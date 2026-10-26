@@ -244,7 +244,7 @@ RULES
 - Review notes: open questions, recommendations, accessibility concerns. "affects" lists screens and ACs like "J1.2.1.1, J1.2.1.4 · AC-3, AC-5".
 - Plain, short sentences.
 
-Return ONLY JSON, no prose, matching:
+Return exactly ONE JSON object and nothing else: no prose, no code fences, no notes before or after it. Keep every string on one line (use \n inside strings). The object must match:
 {"prd":{"<section id>":{"status":"filled|partial|missing","content":"..."}},
 "stories":[{"id":"US-1","text":"...","rating":"Strong|Needs Clarification|Critical Gap","critique":"..."}],
 "ux":{"verdict":"Sufficient|Partially sufficient|Insufficient","problem":"paragraph","gaps":[{"category":"Edge case|Empty state|Error state|Bulk action|Business rule|Permissions|Accessibility|Scope","severity":"Needs Clarification|Critical Gap","title":"...","detail":"...","ask":"question for the PO"}]},
@@ -253,11 +253,48 @@ Return ONLY JSON, no prose, matching:
 "reviewNotes":{"openQuestions":[{"title":"...","body":"...","answer":"","affects":"...","done":false}],"recommendations":[...same shape],"accessibility":[...same shape]}}`;
 }
 
+/* Reads the JSON an AI agent returns, even when it adds prose, code fences, a second block,
+   trailing commas, smart quotes, or stops before closing every bracket. */
+function balanced(t, start) {
+  const open = t[start], close = open === "{" ? "}" : "]";
+  let depth = 0, inStr = false, esc = false;
+  for (let i = start; i < t.length; i++) {
+    const c = t[i];
+    if (inStr) { if (esc) esc = false; else if (c === "\\") esc = true; else if (c === '"') inStr = false; continue; }
+    if (c === '"') inStr = true;
+    else if (c === "{" || c === "[") depth++;
+    else if (c === "}" || c === "]") { depth--; if (depth === 0) return t.slice(start, i + 1); }
+  }
+  return null;
+}
+function repair(s) {
+  let out = s.replace(/[“”]/g, '"').replace(/,\s*([}\]])/g, "$1");
+  // close a cut-off answer: drop the unfinished tail, then close open strings and brackets
+  const stack = []; let inStr = false, esc = false;
+  for (const c of out) {
+    if (inStr) { if (esc) esc = false; else if (c === "\\") esc = true; else if (c === '"') inStr = false; continue; }
+    if (c === '"') inStr = true; else if (c === "{" || c === "[") stack.push(c === "{" ? "}" : "]"); else if (c === "}" || c === "]") stack.pop();
+  }
+  if (inStr) out += '"';
+  out = out.replace(/,\s*$/, "").replace(/,\s*"[^"]*"\s*:?\s*$/, "");
+  return out + stack.reverse().join("");
+}
+export const repairPrompt = (broken) => `The text below was meant to be ONE valid JSON object, but it can't be parsed (extra text, a second object, or a cut-off ending). Return the same content as exactly one valid JSON object. Keep all data; close anything that was cut off. No prose, no code fences.\n\n${String(broken).slice(0, 200000)}`;
 export function parseJSONLoose(text) {
-  const t = text.replace(/^```(?:json)?/m, "").replace(/```\s*$/m, "");
-  const a = t.indexOf("{"), b = t.lastIndexOf("}");
-  if (a < 0 || b < a) throw new Error("No JSON in the answer");
-  return JSON.parse(t.slice(a, b + 1));
+  const t = String(text || "").replace(/```(?:json)?/gi, "");
+  const starts = [];
+  for (let i = 0; i < t.length && starts.length < 20; i++) if (t[i] === "{" || (t[i] === "[" && starts.length === 0)) starts.push(i);
+  if (!starts.length) throw new Error("The answer didn't contain JSON.");
+  let best = null, lastErr;
+  for (const st of starts) {
+    const chunk = balanced(t, st);
+    for (const cand of chunk ? [chunk, repair(chunk)] : [repair(t.slice(st))]) {
+      try { const v = JSON.parse(cand); if (!best || cand.length > best.len) best = { v, len: cand.length }; break; } catch (e) { lastErr = e; }
+    }
+    if (best && best.len > t.length * 0.5) break;
+  }
+  if (!best) throw new Error("The answer's JSON couldn't be read (" + (lastErr?.message || "invalid") + ").");
+  return best.v;
 }
 
 export function normalize(r, ctx) {

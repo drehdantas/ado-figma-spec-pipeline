@@ -2,7 +2,7 @@ import React, { useEffect, useMemo, useRef, useState, useSyncExternalStore } fro
 import { createRoot } from "react-dom/client";
 import { GitCompare, ArrowLeft, ArrowRight, Plus, Loader2, CheckCircle2, XCircle, X, Copy, Figma, ClipboardPaste } from "lucide-react";
 import { Btn, Modal, Toast, Field, copyText } from "./ui.jsx";
-import { localAnalyze, buildAnalysisPrompt, parseJSONLoose, normalize } from "./engine.js";
+import { localAnalyze, buildAnalysisPrompt, parseJSONLoose, normalize, repairPrompt } from "./engine.js";
 import { Step2, Step3 } from "./steps23.jsx";
 import { Step1 } from "./step1.jsx";
 import { Step4, compile } from "./step4.jsx";
@@ -85,13 +85,19 @@ function PipelineView({ cfg, setCfg, pipe, setPipe, all, caps, ai, notify, guard
         if (imgs.length) setProgress(`Thinking… (${imgs.length} image${imgs.length > 1 ? "s" : ""} attached)`);
         const prompt = buildAnalysisPrompt(adoText, ctx()) + (imgs.length ? `\n\nATTACHED IMAGES: ${imgs.length} image(s) from the ADO, in the order of the [Image n] markers above. Read them as part of the work item.` : "");
         const text = await ai.ask(prompt, { images: imgs, signal: ctl.current.signal, title: "Convert the ADO", onText: (t) => setProgress(t.length > 80 ? `Writing analysis… ${t.length.toLocaleString()} characters` : t) });
-        const parsed = normalize(parseJSONLoose(text), ctx());
+        let data;
+        try { data = parseJSONLoose(text); }
+        catch {
+          setProgress("Tidying the answer…");
+          data = parseJSONLoose(await ai.ask(repairPrompt(text), { signal: ctl.current.signal, title: "Fix the answer's JSON", tier: "default" }));
+        }
+        const parsed = normalize(data, ctx());
         parsed.engine = ai.label;
         setPipe({ res: parsed, step: 2, analyzedRaw: ado.raw }); notify("Analysis ready");
       } catch (e) {
         if (e?.code === "cancelled") setErr("Stopped. Nothing was changed.");
         else if (e?.code === "not_granted") { setErr("AI access was declined, so the local rules engine was used instead."); setPipe({ res: localAnalyze(adoText, ctx()), step: 2, analyzedRaw: ado.raw }); }
-        else setErr(`${e?.message || "The AI answer couldn't be used."} Try again, or switch to Local rules.`);
+        else setErr(`The AI's answer couldn't be read (${e?.message || "unknown error"}). Convert again: answers vary from run to run. If it keeps happening, shorten very long pasted content or switch to Local rules.`);
       } finally { setBusy(false); }
     });
   };
