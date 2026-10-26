@@ -1,0 +1,11 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 960 150" width="960" height="150" font-family="Helvetica, Arial, sans-serif">
+  <rect width="960" height="150" fill="#ffffff"/>
+  <g font-size="13" fill="#1f2328">
+    <g transform="translate(16,30)"><rect width="204" height="90" rx="8" fill="#eef2ff" stroke="#4f46e5"/><text x="16" y="28" font-weight="700" fill="#4338ca">1 · Raw ADO</text><text x="16" y="52">Markdown, images,</text><text x="16" y="70">PO and stakeholders</text></g>
+    <g transform="translate(252,30)"><rect width="204" height="90" rx="8" fill="#eef2ff" stroke="#4f46e5"/><text x="16" y="28" font-weight="700" fill="#4338ca">2 · PRD &amp; audit</text><text x="16" y="52">Template mapping, story</text><text x="16" y="70">audit, suggested answers</text></g>
+    <g transform="translate(488,30)"><rect width="204" height="90" rx="8" fill="#eef2ff" stroke="#4f46e5"/><text x="16" y="28" font-weight="700" fill="#4338ca">3 · Matrices</text><text x="16" y="52">AC validation, drift,</text><text x="16" y="70">review-notes board</text></g>
+    <g transform="translate(724,30)"><rect width="220" height="90" rx="8" fill="#eef2ff" stroke="#4f46e5"/><text x="16" y="28" font-weight="700" fill="#4338ca">4 · Prompt &amp; Figma</text><text x="16" y="52">Master prompt, or a draft</text><text x="16" y="70">page built in Figma</text></g>
+  </g>
+  <g stroke="#4f46e5" stroke-width="2" fill="none"><path d="M222 75h26M458 75h26M694 75h26"/></g>
+  <g fill="#4f46e5"><path d="M248 75l-7-5v10z"/><path d="M484 75l-7-5v10z"/><path d="M720 75l-7-5v10z"/></g>
+</svg>
