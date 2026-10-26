@@ -119,7 +119,7 @@ function routePRD(sections, ado, ctx, stories, acs, gaps) {
     else if (/user flow/.test(k) && ctx.figmaUrl) { c = `Figma: ${ctx.figmaUrl}\nJourney node: ${ctx.journeyNode}`; st = "partial"; }
     else if (/journey map/.test(k) && ctx.journeyNode) { c = `Journey node ${ctx.journeyNode}. Pain points not provided.`; st = "partial"; }
     else if (/product type/.test(k) && /existing|already|current/i.test(raw)) { c = "Built on an existing product (named in the ADO)."; st = "partial"; }
-    else if (/technical|data, ai/.test(k) && /sync|data|api|refresh/i.test(raw)) { c = (raw.match(/[^.\n]*(sync|data model|api|refresh|back end)[^.\n]*/gi) || []).slice(0, 4).join("\n"); st = "partial"; }
+    else if (/technical|digital|data, ai/.test(k) && /sync|data|api|refresh/i.test(raw)) { c = (raw.match(/[^.\n]*(sync|data model|api|refresh|back end)[^.\n]*/gi) || []).slice(0, 4).join("\n"); st = "partial"; }
     else if (/open questions/.test(k)) { c = "See Open Questions in the Validation Matrix."; st = "filled"; }
     else if (/glossary/.test(k)) { const ab = [...new Set(raw.match(/\b[A-Z]{2,5}\b/g) || [])].filter((a) => !/^AC$|^ADO$/.test(a)).slice(0, 10); if (ab.length) { c = ab.join(" · ") + " – definitions not provided"; st = "partial"; } }
     else if (/reference/.test(k)) { c = [ado.link || ado.id, ctx.sotUrl].filter(Boolean).join("\n"); st = c ? "partial" : "missing"; }
