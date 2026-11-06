@@ -1,5 +1,6 @@
 import React, { useMemo, useState, useSyncExternalStore } from "react";
-import { Figma, RefreshCw, Wand2, AlertTriangle, CheckCircle2, XCircle, Circle, Loader2, ExternalLink, Code2, Copy, Download, Square } from "lucide-react";
+import { Figma, RefreshCw, Wand2, AlertTriangle, CheckCircle2, XCircle, Circle, Loader2, ExternalLink, Code2, Copy, Download, Square, MonitorPlay, Maximize2, Sparkles, LayoutTemplate } from "lucide-react";
+import { protoScreens } from "./prototype.js";
 import { Btn, Modal, Field, inputCls, copyText, fmtDate } from "./ui.jsx";
 import { validationMD, driftMD, validationCSV, driftCSV, prdMD, reviewNotesMD } from "./engine.js";
 import { parseFigmaUrl, runInFigma, figmaErrorText, pagesToGroups, extractPages, screenList } from "./figma.js";
@@ -27,6 +28,7 @@ export function compile(cfg, pipe, res, inc, agent) {
   if (inc.figma) out.push(`## 1. Figma target, source of truth and sitemap\n- Target file / branch: ${pipe.figmaUrl || "—"}\n- Source of truth for precedents: ${cfg.sotUrl || "—"}. Before designing a pattern, check the SOT for an existing screen that solves it and reuse it.\n- Journey node (Figma page): ${node}\n- Screens to build (journey node → ACs covered):\n${screens.map((s) => `- ${s.id}: ${s.acs.split("; ").map((a) => a.split(" ")[0]).join(", ")}`).join("\n") || `- ${nodeId}.1 …`}\n- Every frame, layer group and note references its J-node so the sitemap stays organic.`);
   if (inc.ds) out.push(`## 2. Design system rules · ${ds.name} (${RULES[ds.rule]?.label})\n${RULES[ds.rule]?.text}${ds.fallback ? `\n(This slot has no package yet: the files of “${ds.fallback}” below are the reference.)` : ""}\nNever invent color values or spacing outside the design system's scale.\n\n${ds.files.map((f) => `### ${f.path}\n${f.content.trim()}`).join("\n\n")}`);
   if (inc.prd) out.push(`## 3. Structured PRD (${cfg.template.name})\n${prdMD(cfg.template.sections, res.prd, ado).replace(/^# .*\n/, "")}`);
+  if (ado.designerNotes) out.push(`## Designer comments\nTake these into account in every screen and decision:\n${ado.designerNotes}`);
   if (inc.stories) out.push(`## 4. User stories and readiness\nProblem understanding (${res.ux.verdict}): ${res.ux.problem}\n\n${res.stories.map((s) => `- ${s.id} [${s.rating}] ${s.text}\n  Critique: ${s.critique}`).join("\n")}\n\nGaps to design around or flag:\n${res.ux.gaps.map((g) => `- [${g.severity}] ${g.category} – ${g.title}: ${g.detail} PO question: ${g.ask}${g.answer ? ` Proposed answer (unconfirmed): ${g.answer}` : ""}`).join("\n")}`);
   if (inc.validation) out.push(`## 5. Acceptance Criteria Validation Matrix\nPlace to the right of the Figma frames. Status values: Designed · Documented / Dev Note Only - No Comp Needed · Blocked.\n\n${validationMD(res.validation)}`);
   if (inc.drift) out.push(`## 6. System & Regional Drift Matrix\nPlace below the Validation Matrix.\n\n${driftMD(res.drift, res.driftColumns)}`);
@@ -166,7 +168,57 @@ function FigmaBuild({ cfg, pipe, setPipe, res, mcp, ai, notify, onSitemap, start
   );
 }
 
-export function Step4({ cfg, pipe, setPipe, res, notify, downloads, mcp, ai, onSitemap, startBuild, guard }) {
+function PrototypePanel({ pipe, res, ai, proto, loadProto, startPrototype, notify, downloads }) {
+  useSyncExternalStore(jobStore.subscribe, jobStore.snapshot);
+  const job = jobStore.forPipeline(pipe.id, "prototype");
+  const running = job?.status === "running";
+  const [mode, setMode] = useState("ai");
+  const frame = React.useRef(null);
+  React.useEffect(() => { loadProto(pipe.id); }, [pipe.id]);
+  const screens = protoScreens(pipe, res, screenList);
+  const slug = (pipe.ado.id || "journey").replace(/[^\w-]+/g, "-");
+  const full = () => { try { frame.current?.requestFullscreen?.(); } catch {} };
+  return (
+    <section aria-label="Navigable HTML prototype" className="rounded-lg border border-line bg-surface">
+      <div className="flex flex-wrap items-start justify-between gap-4 border-b border-line p-4">
+        <div className="flex min-w-0 items-start gap-3">
+          <span className="flex h-10 w-10 shrink-0 items-center justify-center rounded-md bg-accent text-accent-fg"><MonitorPlay size={18} aria-hidden="true" /></span>
+          <div className="min-w-0">
+            <h3 className="text-sm font-semibold">Navigable HTML prototype</h3>
+            <p className="max-w-[80ch] text-sm text-muted-strong">A clickable version of the journey in one HTML file, for presentations and user tests. It covers {screens.length} screen{screens.length === 1 ? "" : "s"} {pipe.figmaBuild?.plan?.length ? "planned for the Figma page" : "from the designed journey nodes"}, with the design-system colors and the designer comments.</p>
+          </div>
+        </div>
+        <div className="flex flex-wrap items-center gap-2">
+          <div role="radiogroup" aria-label="Prototype type" className="flex rounded-md bg-surface-2 p-1">
+            {[["ai", `Interactive · ${ai.label}`, Sparkles], ["storyboard", "Quick storyboard · no AI", LayoutTemplate]].map(([k, l, I]) => (
+              <button key={k} role="radio" aria-checked={mode === k} onClick={() => setMode(k)} className={`flex items-center gap-1 rounded px-2 py-1 text-xs ${mode === k ? "bg-surface font-semibold text-fg shadow-sm" : "text-muted hover:text-fg"}`}><I size={13} aria-hidden="true" />{l}</button>
+            ))}
+          </div>
+          <Btn variant="primary" icon={running ? Loader2 : MonitorPlay} disabled={running || !screens.length} onClick={() => startPrototype(pipe.id, mode)}>{running ? "Writing prototype…" : proto?.html ? "Generate again" : "Generate prototype"}</Btn>
+        </div>
+      </div>
+      <div className="flex flex-col gap-3 p-4">
+        {!screens.length && <p className="text-sm text-warn-fg">No screens yet: mark at least one acceptance criterion as Designed in step 3, or plan the Figma page first.</p>}
+        {running && <p role="status" className="flex items-center gap-2 text-sm"><Loader2 size={14} className="animate-spin text-accent" />{job.steps?.[0]?.note || "Writing…"} · runs in the background, you can keep working.</p>}
+        {job?.status === "error" && <p role="alert" className="rounded-md bg-bad-bg px-3 py-2 text-sm text-bad-fg">{job.error}</p>}
+        {proto?.html ? (<>
+          <div className="flex flex-wrap items-center justify-between gap-2">
+            <p className="text-xs text-muted">{proto.mode === "storyboard" ? "Quick storyboard" : `Interactive · ${proto.by || "AI"}`} · {proto.screens} screens · {Math.round(proto.html.length / 1024)} KB · {fmtDate(proto.at)}. Keys inside: J journey list, P present mode, ← → previous / next.</p>
+            <div className="flex flex-wrap gap-1.5">
+              <Btn size="sm" icon={Maximize2} onClick={full}>Full screen</Btn>
+              <Btn size="sm" icon={Download} onClick={() => saveFile(downloads, `${slug}-prototype.html`, proto.html, notify)}>Download .html</Btn>
+              <Btn size="sm" icon={Copy} onClick={() => copyText(proto.html, notify)}>Copy HTML</Btn>
+            </div>
+          </div>
+          <iframe ref={frame} title="Prototype preview" srcDoc={proto.html} sandbox="allow-scripts allow-forms allow-modals" className="h-[70vh] w-full rounded-md border border-line bg-white" />
+          <p className="text-xs text-muted">To test with users or present, download the file and open it in any browser; it works offline. You can also publish it as a Claude artifact to share a link.</p>
+        </>) : !running && screens.length > 0 && <p className="text-sm text-muted">Interactive: the AI writes real interactions (tabs, filters, dialogs, toasts, empty and error states) and links every screen. Quick storyboard: an instant click-through of the screens with captions, built without AI.</p>}
+      </div>
+    </section>
+  );
+}
+
+export function Step4({ cfg, pipe, setPipe, res, notify, downloads, mcp, ai, onSitemap, startBuild, guard, proto, loadProto, startPrototype }) {
   const [inc, setInc] = useState({ figma: true, ds: true, prd: true, stories: true, validation: true, drift: true, board: true });
   const [agent, setAgent] = useState("Figma agent");
   const [fallback, setFallback] = useState(null);
@@ -185,6 +237,7 @@ export function Step4({ cfg, pipe, setPipe, res, notify, downloads, mcp, ai, onS
   return (
     <div className="flex flex-col gap-6">
       <FigmaBuild cfg={cfg} pipe={pipe} setPipe={setPipe} res={res} mcp={mcp} ai={ai} notify={notify} onSitemap={onSitemap} startBuild={startBuild} guard={guard} />
+      <PrototypePanel pipe={pipe} res={res} ai={ai} proto={proto} loadProto={loadProto} startPrototype={startPrototype} notify={notify} downloads={downloads} />
       <div className="grid gap-6 lg:grid-cols-[18rem_1fr]">
         <aside className="flex min-w-0 flex-col gap-4">
           <div className="rounded-lg border border-line bg-surface p-4">

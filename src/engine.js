@@ -189,6 +189,7 @@ export function localAnalyze(ado, ctx) {
     ],
   };
 
+  const notes = String(ado.designerNotes || "").trim();
   return {
     engine: "Local rules (no AI)",
     generatedAt: new Date().toISOString(),
@@ -196,9 +197,9 @@ export function localAnalyze(ado, ctx) {
     stories: ratedStories,
     ux: {
       verdict,
-      problem: verdict === "Sufficient"
+      problem: (verdict === "Sufficient"
         ? "The stories name users, actions and benefits, and the criteria are concrete enough to design against. Review the gaps below before sign-off."
-        : `The work item ${stories.length ? "describes system behaviour more than user goals" : "has no user stories"}, so parts of the design rest on assumptions. ${gaps.length} gaps found, ${crit} critical. Use the questions below with the Product Owner before final design.`,
+        : `The work item ${stories.length ? "describes system behaviour more than user goals" : "has no user stories"}, so parts of the design rest on assumptions. ${gaps.length} gaps found, ${crit} critical. Use the questions below with the Product Owner before final design.`) + (notes ? `\n\nDesigner comments taken into account: ${notes}` : ""),
       gaps,
     },
     validation,
@@ -233,7 +234,12 @@ ADO WORK ITEM (ID ${ado.id || "?"}, PO ${ado.po || "?"}, stakeholders ${ado.stak
 """
 ${ado.raw}
 """
-
+${ado.designerNotes ? `
+DESIGNER COMMENTS (from the product designer; take them into account in every part of the analysis: they add context, constraints, decisions already made and concerns to check. They do not replace the work item: where they conflict with it, flag the conflict as a gap for the PO instead of choosing silently):
+"""
+${ado.designerNotes}
+"""
+` : ""}
 RULES
 - Use only facts in the ADO. If a PRD section has no support, status "missing" and content "". If partly supported, status "partial" and say what's missing.
 - Rate each user story: "Strong", "Needs Clarification" or "Critical Gap", with a one-to-two sentence critique naming the missing piece.

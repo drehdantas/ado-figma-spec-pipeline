@@ -15,10 +15,12 @@ import { DEFAULT_CONFIG, DEFAULT_NODE, migrateConfig, activeDS, dsLabel, RULES }
 import { makeAI } from "./ai.js";
 import { jobStore, isRunning } from "./jobs.js";
 import { runFigmaBuild } from "./figma-runner.js";
+import { protoScreens, protoTokens, prototypePrompt, extractHtml, storyboardHtml } from "./prototype.js";
+import { screenList } from "./figma.js";
 import { relatedPipelines, historyForSection, suggestPrompt } from "./suggest.js";
 import { DEMO_ADO, DEMO_ANALYSIS } from "./sample/demo.js";
 
-const EMPTY_ADO = { id: "", link: "", po: "", stakeholders: "", title: "", raw: "", images: {} };
+const EMPTY_ADO = { id: "", link: "", po: "", stakeholders: "", title: "", raw: "", designerNotes: "", images: {} };
 const uid = () => "p" + Date.now().toString(36) + Math.random().toString(36).slice(2, 6);
 const now = () => new Date().toISOString();
 const newPipeline = (over = {}) => ({ ado: EMPTY_ADO, res: null, step: 1, engine: "ai", figmaUrl: "", journeyNode: DEFAULT_NODE, analyzedRaw: "", figmaRuns: [], ...over, id: uid(), createdAt: now(), updatedAt: now() });
@@ -52,7 +54,10 @@ function Stepper({ step, setStep, hasResult }) {
 }
 
 /* ---------------- Pipeline view ---------------- */
-function PipelineView({ cfg, setCfg, pipe, setPipe, all, caps, ai, notify, guard, startBuild }) {
+/* What the analysis was made from: the ADO text plus the designer comments, so editing either enables converting again. */
+const analysisSig = (ado) => ado.raw + (ado.designerNotes?.trim() ? `\n\n[designer]\n${ado.designerNotes.trim()}` : "");
+
+function PipelineView({ cfg, setCfg, pipe, setPipe, all, caps, ai, notify, guard, startBuild, proto, loadProto, startPrototype }) {
   const [drawer, setDrawer] = useState(() => { try { return localStorage.getItem("adoPipeline.drawer") !== "0"; } catch { return true; } });
   const [busy, setBusy] = useState(false);
   const [progress, setProgress] = useState("");
@@ -67,16 +72,17 @@ function PipelineView({ cfg, setCfg, pipe, setPipe, all, caps, ai, notify, guard
   const ds = activeDS(cfg);
   const cfgView = { ...cfg, dsName: dsLabel(cfg) };
   const ctx = () => ({ productName: cfg.productName, sections: cfg.template.sections, dsFiles: ds.files, dsName: ds.name, dsRule: ds.rule, dsRuleText: RULES[ds.rule]?.text, styleGuide: cfg.styleGuide, figmaUrl: pipe.figmaUrl, sotUrl: cfg.sotUrl, journeyNode: pipe.journeyNode, driftColumns: res?.driftColumns || { primary: "Primary market", variantA: "Variant A", variantB: "Variant B" } });
-  const upToDate = !!res && pipe.analyzedRaw === ado.raw && !!ado.raw.trim();
+  const sig = analysisSig(ado);
+  const upToDate = !!res && pipe.analyzedRaw === sig && !!ado.raw.trim();
   const g = (label, fn) => guard(pipe.id, label, fn);
 
   const run = () => {
     setErr("");
     if (upToDate) { setPipe({ step: 2 }); return; }
     g("Converting the ADO again", async () => {
-      if (ado.raw === DEMO_ADO.raw) { setPipe({ res: DEMO_ANALYSIS, step: 2, analyzedRaw: ado.raw }); return; }
+      if (ado.raw === DEMO_ADO.raw && !ado.designerNotes?.trim()) { setPipe({ res: DEMO_ANALYSIS, step: 2, analyzedRaw: sig }); return; }
       const adoText = { ...ado, raw: mdForPrompt(ado.raw) };
-      if (engine === "local") { setPipe({ res: localAnalyze(adoText, ctx()), step: 2, analyzedRaw: ado.raw }); notify("Analyzed with local rules"); return; }
+      if (engine === "local") { setPipe({ res: localAnalyze(adoText, ctx()), step: 2, analyzedRaw: sig }); notify("Analyzed with local rules"); return; }
       setBusy(true); setProgress("Thinking…");
       ctl.current = new AbortController();
       try {
@@ -93,10 +99,10 @@ function PipelineView({ cfg, setCfg, pipe, setPipe, all, caps, ai, notify, guard
         }
         const parsed = normalize(data, ctx());
         parsed.engine = ai.label;
-        setPipe({ res: parsed, step: 2, analyzedRaw: ado.raw }); notify("Analysis ready");
+        setPipe({ res: parsed, step: 2, analyzedRaw: sig }); notify("Analysis ready");
       } catch (e) {
         if (e?.code === "cancelled") setErr("Stopped. Nothing was changed.");
-        else if (e?.code === "not_granted") { setErr("AI access was declined, so the local rules engine was used instead."); setPipe({ res: localAnalyze(adoText, ctx()), step: 2, analyzedRaw: ado.raw }); }
+        else if (e?.code === "not_granted") { setErr("AI access was declined, so the local rules engine was used instead."); setPipe({ res: localAnalyze(adoText, ctx()), step: 2, analyzedRaw: sig }); }
         else setErr(`The AI's answer couldn't be read (${e?.message || "unknown error"}). Convert again: answers vary from run to run. If it keeps happening, shorten very long pasted content or switch to Local rules.`);
       } finally { setBusy(false); }
     });
@@ -147,7 +153,7 @@ function PipelineView({ cfg, setCfg, pipe, setPipe, all, caps, ai, notify, guard
         {step === 1 && <Step1 ado={ado} setAdo={(a) => setPipe({ ado: a })} updAdo={(fn) => setPipe((p) => ({ ado: fn(p.ado) }))} engine={engine} setEngine={(e) => setPipe({ engine: e })} aiLabel={ai.label} run={run} busy={busy} progress={progress} stop={() => ctl.current?.abort()} err={err} upToDate={upToDate} assets={caps.assets} notify={notify} />}
         {step === 2 && res && <Step2 cfg={cfgView} ado={ado} res={res} setRes={setRes} notify={notify} onPdf={onPdf} pdfBusy={pdfBusy} history={history} onSuggest={onSuggest} suggestBusy={suggestBusy} aiLabel={ai.label} />}
         {step === 3 && res && <Step3 cfg={cfgView} res={res} setRes={setRes} />}
-        {step === 4 && res && <Step4 cfg={cfgView} pipe={pipe} setPipe={setPipe} res={res} notify={notify} downloads={caps.downloads} mcp={caps.mcp} ai={ai} startBuild={startBuild} guard={g}
+        {step === 4 && res && <Step4 cfg={cfgView} pipe={pipe} setPipe={setPipe} res={res} notify={notify} downloads={caps.downloads} mcp={caps.mcp} ai={ai} startBuild={startBuild} guard={g} proto={proto} loadProto={loadProto} startPrototype={startPrototype}
           onSitemap={(groups, n) => setCfg({ ...cfg, journey: { groups, source: `Synced from target file · ${n} pages`, syncedAt: now() } })} />}
         {res && step > 1 && step < 4 && (
           <div className="flex justify-end gap-2 border-t border-line pt-4">
@@ -169,6 +175,7 @@ function JobIndicator({ pipelines, onOpen }) {
     <div className="flex flex-wrap gap-1.5" aria-live="polite">
       {jobs.map((j) => {
         const done = j.steps.filter((s) => s.status === "ok").length;
+        const proto = j.kind === "prototype";
         const p = pipelines[j.pipelineId];
         const label = p?.ado?.id || p?.ado?.title || j.title;
         const tone = j.status === "running" ? "border-accent/50 bg-accent-soft text-accent-strong" : j.status === "done" ? "border-line bg-ok-bg text-ok-fg" : "border-line bg-bad-bg text-bad-fg";
@@ -177,7 +184,7 @@ function JobIndicator({ pipelines, onOpen }) {
           <span key={j.id} className={`inline-flex max-w-[22rem] items-center gap-1.5 rounded-full border py-1 pl-2.5 pr-1 text-xs font-medium ${tone}`}>
             <I size={13} className={j.status === "running" ? "animate-spin" : ""} aria-hidden="true" />
             <button className="truncate pr-1.5 hover:underline" onClick={() => { onOpen(j.pipelineId); if (j.status !== "running") jobStore.update(j.id, { seen: true }); }}>
-              {j.status === "running" ? `Building in Figma · ${label} · ${done}/${j.steps.length}${j.stopping ? " · stopping" : ""}` : j.status === "done" ? `Figma page ready · ${label}` : j.status === "stopped" ? `Figma build stopped · ${label}` : `Figma build failed · ${label}`}
+              {proto ? (j.status === "running" ? `Writing prototype · ${label}` : j.status === "done" ? `Prototype ready · ${label}` : j.status === "stopped" ? `Prototype stopped · ${label}` : `Prototype failed · ${label}`) : j.status === "running" ? `Building in Figma · ${label} · ${done}/${j.steps.length}${j.stopping ? " · stopping" : ""}` : j.status === "done" ? `Figma page ready · ${label}` : j.status === "stopped" ? `Figma build stopped · ${label}` : `Figma build failed · ${label}`}
             </button>
             {j.status !== "running" && <button aria-label="Dismiss" className="rounded-full p-0.5 hover:bg-surface/60" onClick={() => jobStore.update(j.id, { seen: true })}><X size={12} /></button>}
           </span>
@@ -250,7 +257,7 @@ function App() {
       use("downloads").then((x) => setCaps((c) => ({ ...c, downloads: x || null }))).catch(() => {});
       use("assets").then((x) => setCaps((c) => ({ ...c, assets: x || null }))).catch(() => {});
     }
-    const warn = (e) => { if (jobStore.running().length) { e.preventDefault(); e.returnValue = "A Figma page is still being built."; return e.returnValue; } };
+    const warn = (e) => { if (jobStore.running().length) { e.preventDefault(); e.returnValue = "A Figma page or prototype is still being built."; return e.returnValue; } };
     window.addEventListener("beforeunload", warn);
     return () => { unsub(); window.removeEventListener("beforeunload", warn); };
   }, []);
@@ -278,7 +285,7 @@ function App() {
   };
   const create = (over) => { const p = newPipeline(over); latest.current = { ...latest.current, [p.id]: p }; setPipelines(latest.current); storeRef.current?.savePipeline(p).catch(() => {}); setOpenId(p.id); };
   const remove = (id) => {
-    const run = jobStore.running().find((j) => j.pipelineId === id); if (run) jobStore.stop(run.id);
+    jobStore.running().filter((j) => j.pipelineId === id).forEach((j) => jobStore.stop(j.id));
     pending.current.delete(id); clearTimeout(timers.current[id]);
     const n = { ...latest.current }; delete n[id]; latest.current = n; setPipelines(n);
     storeRef.current?.deletePipeline(id).catch(() => notify("Couldn't delete. Try again."));
@@ -289,12 +296,12 @@ function App() {
   const ai = useMemo(() => makeAI({ aiCfg: cfg.ai, caps, manualBridge }), [cfg.ai, caps]);
 
   const guard = (pid, label, proceed) => {
-    const job = jobStore.running().find((j) => j.pipelineId === pid);
+    const job = jobStore.running().find((j) => j.pipelineId === pid && (j.kind || "figma") === "figma");
     if (!job) { proceed(); return; }
     setInterrupt({ label, proceed, job });
   };
   const startBuild = (pid, { resume, autoDraftName }) => {
-    if (isRunning(pid)) return;
+    if (isRunning(pid, "figma")) return;
     updatePipe(pid, { autoDraftName });
     const cfgNow = { ...cfgRef.current, dsName: dsLabel(cfgRef.current) };
     runFigmaBuild({
@@ -302,6 +309,44 @@ function App() {
       getPipe: (id) => latest.current[id], updatePipe,
       compileBrief: () => compile(cfgNow, latest.current[pid], latest.current[pid].res, { figma: true, ds: false, prd: true, stories: true, validation: true, drift: true, board: false }, "Figma agent"),
     });
+  };
+
+  /* Navigable HTML prototype: a background job, saved apart from the pipeline because the HTML is large. */
+  const [protos, setProtos] = useState({});
+  const protosRef = useRef(protos); protosRef.current = protos;
+  const loadProto = async (pid) => {
+    if (protosRef.current[pid] !== undefined) return;
+    let d = null; try { d = await storeRef.current?.getDoc("prototypes", pid); } catch {}
+    setProtos((p) => (p[pid] !== undefined ? p : { ...p, [pid]: d || null }));
+  };
+  const startPrototype = (pid, mode) => {
+    if (isRunning(pid, "prototype")) return;
+    const pipe = latest.current[pid]; if (!pipe?.res) return;
+    const cfgNow = { ...cfgRef.current, dsName: dsLabel(cfgRef.current) };
+    const screens = protoScreens(pipe, pipe.res, screenList);
+    const tokens = protoTokens(cfgNow);
+    const notes = pipe.ado.designerNotes?.trim() || "";
+    const job = jobStore.start({ id: uid(), kind: "prototype", pipelineId: pid, title: pipe.ado.id || pipe.ado.title || "Prototype", steps: [{ label: "Write prototype", status: "running", note: mode === "ai" ? `Writing the prototype with ${ai.label}…` : "Building the storyboard…" }] });
+    (async () => {
+      try {
+        let html, by;
+        if (mode === "storyboard") { html = storyboardHtml({ title: pipe.ado.title || pipe.ado.id || "Journey", productName: cfgNow.productName, screens, tokens, res: pipe.res, notes }); by = "No AI"; }
+        else {
+          const brief = compile(cfgNow, pipe, pipe.res, { figma: false, ds: false, prd: true, stories: true, validation: true, drift: false, board: false }, "Prototype agent");
+          const text = await ai.ask(prototypePrompt({ brief, screens, tokens, productName: cfgNow.productName, notes }), { title: "Write the HTML prototype", onText: (t) => jobStore.step(job.id, 0, { note: `Writing the prototype… ${t.length.toLocaleString()} characters` }) });
+          if (jobStore.get(job.id)?.abort) throw Object.assign(new Error("Stopped."), { code: "cancelled" });
+          html = extractHtml(text); by = ai.label;
+        }
+        const doc = { html, mode, at: now(), by, screens: screens.length };
+        setProtos((p) => ({ ...p, [pid]: doc }));
+        jobStore.step(job.id, 0, { status: "ok" }); jobStore.update(job.id, { status: "done" });
+        if (html.length > 240000) notify("Prototype ready. It's too large to keep here, so download it.");
+        else { notify("Prototype ready"); storeRef.current?.saveDoc("prototypes", pid, doc)?.catch?.(() => notify("Prototype ready, but it couldn't be saved. Download it to keep it.")); }
+      } catch (e) {
+        jobStore.step(job.id, 0, { status: "error" });
+        jobStore.update(job.id, { status: e?.code === "cancelled" ? "stopped" : "error", error: e?.code === "cancelled" ? "Stopped." : `Couldn't write the prototype: ${e?.message || "unknown error"}. Try again, or use the quick storyboard.` });
+      }
+    })();
   };
 
   const open = pipelines[openId];
@@ -329,9 +374,9 @@ function App() {
             <button onClick={() => setOpenId(null)} className="flex items-center gap-1 text-muted hover:text-fg"><ArrowLeft size={14} />All spec pipelines</button>
             <span className="text-muted">/</span>
             <span className="truncate font-medium">{open.ado.id || open.ado.title || "New ADO"}</span>
-            {isRunning(open.id) && <span className="ml-2 inline-flex items-center gap-1 text-xs text-accent-strong"><Figma size={12} />Figma build running</span>}
+            {isRunning(open.id, "figma") && <span className="ml-2 inline-flex items-center gap-1 text-xs text-accent-strong"><Figma size={12} />Figma build running</span>}
           </nav>
-          <PipelineView key={openId} cfg={cfg} setCfg={setCfg} pipe={open} setPipe={(patch) => updatePipe(openId, patch)} all={pipelines} caps={caps} ai={ai} notify={notify} guard={guard} startBuild={startBuild} />
+          <PipelineView key={openId} cfg={cfg} setCfg={setCfg} pipe={open} setPipe={(patch) => updatePipe(openId, patch)} all={pipelines} caps={caps} ai={ai} notify={notify} guard={guard} startBuild={startBuild} proto={protos[openId]} loadProto={loadProto} startPrototype={startPrototype} />
         </>
       ) : (
         <Home pipelines={pipelines} loading={loading} storeMode={store?.mode} onOpen={setOpenId} onNew={() => create()}

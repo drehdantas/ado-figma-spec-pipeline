@@ -1,5 +1,5 @@
 import React, { useMemo, useRef } from "react";
-import { FileText, AlertTriangle, ArrowRight, Wand2, Square, Cpu, Link2, User, Users, Hash, Filter } from "lucide-react";
+import { FileText, AlertTriangle, ArrowRight, Wand2, Square, Cpu, Link2, User, Users, Hash, Filter, MessageSquareText } from "lucide-react";
 import { Btn, Field, inputCls } from "./ui.jsx";
 import { extractACs, extractStories } from "./engine.js";
 import { MarkdownEditor, mdForPrompt, imageRefs } from "./mdeditor.jsx";
@@ -32,6 +32,13 @@ export function Step1({ ado, setAdo, updAdo, engine, setEngine, aiLabel, run, bu
             assets={assets} notify={notify}
             placeholder={"Paste the work item from Azure DevOps: text, tables and screenshots all work.\n\n## Description\n…\n\n## User stories\n- As a …, I want …, so that …\n\n## Acceptance criteria\nAC-01 …"} />
         </div>
+        <div className="flex min-w-0 flex-col gap-1 rounded-lg border border-line bg-surface p-3">
+          <label htmlFor="designerNotes" className="flex items-center gap-1.5 text-[11px] font-semibold uppercase tracking-wider text-muted"><MessageSquareText size={12} aria-hidden="true" />Designer comments</label>
+          <p className="text-xs text-muted">Notes for the analysis: context the ADO doesn't say, decisions already made, constraints, research findings, screens to reuse, concerns to check. They're used in the PRD, the audit, suggestions, the Figma build and the prototype. Conflicts with the ADO are flagged as PO questions.</p>
+          <textarea id="designerNotes" rows={5} value={ado.designerNotes || ""} onChange={(e) => updAdo((a) => ({ ...a, designerNotes: e.target.value }))}
+            className="w-full resize-y rounded-md border border-line bg-surface p-2.5 text-sm leading-relaxed text-fg placeholder:text-muted focus:outline focus:outline-2 focus:outline-accent"
+            placeholder={"e.g. Reuse the existing user list pattern from J2.1. Admins mostly work on desktop. Research showed users miss the 14-day warning: make the countdown visible. Legal confirmed the anonymization can't be undone."} />
+        </div>
       </div>
       <aside className="flex min-w-0 flex-col gap-4">
         <div className="rounded-lg border border-line bg-surface p-4">
@@ -60,7 +67,7 @@ export function Step1({ ado, setAdo, updAdo, engine, setEngine, aiLabel, run, bu
         <Btn variant="primary" icon={upToDate ? ArrowRight : Wand2} disabled={!ado.raw.trim() || busy} onClick={run} className="h-11">
           {upToDate ? "Continue to structured PRD & audit" : "Convert ADO to Structured PRD & Analyze"}
         </Btn>
-        {upToDate && <p className="-mt-2 text-xs text-muted">The analysis matches this ADO text. Edit the text to convert again.</p>}
+        {upToDate && <p className="-mt-2 text-xs text-muted">The analysis matches this ADO text. Edit the text or the designer comments to convert again.</p>}
         {busy && (
           <div role="status" className="flex items-center justify-between gap-2 rounded-md border border-line bg-surface p-3 text-sm">
             <span className="flex items-center gap-2"><span className="h-2 w-2 animate-pulse rounded-full bg-accent" />{progress}</span>

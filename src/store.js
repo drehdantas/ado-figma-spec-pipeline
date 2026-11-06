@@ -19,6 +19,8 @@ export async function openStore({ seed }) {
       subscribe(cb) { subs.add(cb); cb(lsRead().pipelines); return () => subs.delete(cb); },
       async savePipeline(p) { const s = lsRead(); s.pipelines[p.id] = p; lsWrite(s); emit(); },
       async deletePipeline(id) { const s = lsRead(); delete s.pipelines[id]; lsWrite(s); emit(); },
+      async getDoc(col, id) { try { return JSON.parse(localStorage.getItem(`${LS}.${col}.${id}`) || "null"); } catch { return null; } },
+      async saveDoc(col, id, data) { try { localStorage.setItem(`${LS}.${col}.${id}`, JSON.stringify(data)); } catch { throw new Error("Browser storage is full."); } },
     };
   }
 
@@ -42,5 +44,7 @@ export async function openStore({ seed }) {
     },
     savePipeline(p) { return write(db.collection("pipelines").doc(p.id), JSON.parse(JSON.stringify(p))); },
     deletePipeline(id) { return db.collection("pipelines").doc(id).delete(); },
+    async getDoc(col, id) { const s = await db.collection(col).doc(id).get(); return s.exists ? s.data() : null; },
+    saveDoc(col, id, data) { return write(db.collection(col).doc(id), data); },
   };
 }

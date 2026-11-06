@@ -47,7 +47,7 @@ export function Home({ pipelines, loading, onOpen, onNew, onDuplicate, onDelete,
             </tr></thead>
             <tbody className="divide-y divide-line">
               {list.map((p) => {
-                const [st, tone] = isRunning(p.id) ? ["Building in Figma…", "accent"] : statusOf(p);
+                const [st, tone] = isRunning(p.id, "figma") ? ["Building in Figma…", "accent"] : statusOf(p);
                 const v = p.res?.validation || [];
                 const oq = p.res ? (p.res.ux?.gaps?.length || 0) + (p.res.reviewNotes?.openQuestions || []).filter((c) => !c.done).length : null;
                 return (

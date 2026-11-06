@@ -16,7 +16,7 @@ export async function runFigmaBuild({ pipelineId, getPipe, updatePipe, cfg, ai, 
   const ctx = pipe0.figmaContext;
   const pageName = pipe0.draftName || pipe0.autoDraftName;
   const res = pipe0.res;
-  const job = jobStore.start({ id: "job-" + pipelineId + "-" + Date.now(), pipelineId, title: pipe0.ado?.id || pipe0.ado?.title || "ADO", pageName, provider: ai.label });
+  const job = jobStore.start({ id: "job-" + pipelineId + "-" + Date.now(), kind: "figma", pipelineId, title: pipe0.ado?.id || pipe0.ado?.title || "ADO", pageName, provider: ai.label });
   const draftId = draftIdOf(pageName);
   let state = resume && pipe0.figmaBuild?.pageName === pageName ? { ...pipe0.figmaBuild } : { pageName, plan: null, pageId: null, mainId: null, done: 0, docs: false };
   const save = (patch) => { state = { ...state, ...patch }; updatePipe(pipelineId, { figmaBuild: state }); };

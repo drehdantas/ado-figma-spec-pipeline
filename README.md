@@ -2,10 +2,10 @@
 
 Turn an Azure DevOps work item into everything a product designer needs before and after designing:
 
-1. **Raw ADO ingestion** – paste the feature as Markdown (text, tables and screenshots), with Product Owner and stakeholders.
+1. **Raw ADO ingestion** – paste the feature as Markdown (text, tables and screenshots), with Product Owner and stakeholders, plus **designer comments**: notes the analysis must take into account (context, decisions, research, constraints).
 2. **Structured PRD & audit** – the work item mapped onto *your* PRD template, a readiness critique of every user story, the gaps to raise with the PO, and **suggested answers** for missing sections drawn from your earlier ADOs and from the AI acting as a UX designer. Export a PO review pack (copy or PDF).
 3. **Validation & drift matrices** – an acceptance-criteria validation matrix, a market / design-system drift matrix and a review-notes board, all editable and exportable (Markdown / CSV).
-4. **Prompt compiler & Figma** – one master prompt for any design or coding agent, or a **one-click draft page in Figma** that follows how your file already builds screens, handoff and documentation.
+4. **Prompt compiler & Figma** – one master prompt for any design or coding agent, a **one-click draft page in Figma** that follows how your file already builds screens, handoff and documentation, and a **navigable HTML prototype** of the journey for presentations and user tests.
 
 Every work item is kept in a history list so the team can come back to it.
 
@@ -70,6 +70,19 @@ Everything below is set in **Configuration & context** inside the app. Nothing i
 
 Requires the Figma MCP server's `use_figma` tool (write access, beta): a Figma plan that includes it and edit access to the target file.
 
+### Designer comments
+
+A free-text field under the raw ADO. The notes go into the analysis prompt (and the local rules engine), suggestions, the master prompt, the PO review pack PDF, the Figma build and the prototype. Where a note contradicts the ADO, the conflict is raised as a PO question. Editing the notes enables converting again.
+
+### Navigable HTML prototype
+
+Step 4 builds one self-contained HTML file of the journey (no external requests, works offline):
+
+- **Interactive** (any AI provider): real interactions — tabs, filters, dialogs, toasts, empty and error states — with every screen linked so a tester can walk the journey end to end.
+- **Quick storyboard** (no AI): an instant click-through of the screens with captions.
+
+Screens come from the Figma plan when one exists, otherwise from the journey nodes of acceptance criteria marked *Designed*. Colours come from the active design system. Inside the prototype: `J` journey list, `P` present mode, `←` `→` previous / next. Preview it in place, open it full screen, download the `.html` or copy it.
+
 ---
 
 ## Project structure
@@ -79,7 +92,8 @@ src/
   app.jsx            App shell, history store, background jobs, AI bridge
   step1.jsx          Raw ADO ingestion (Markdown editor, stakeholders)
   steps23.jsx        Structured PRD & audit, suggestions, matrices, review board
-  step4.jsx          Prompt compiler and the Figma panel
+  step4.jsx          Prompt compiler, the Figma panel and the prototype panel
+  prototype.js       Navigable HTML prototype (AI prompt and no-AI storyboard)
   drawer.jsx         Configuration: AI, PRD template, design-system slots, Figma
   ai.js              Provider-agnostic AI layer
   engine.js          Analysis prompt, local rules engine, exports
