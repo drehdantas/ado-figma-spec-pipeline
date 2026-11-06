@@ -43,16 +43,39 @@ export const draftIdOf = (pageName) => (String(pageName).replace(/^[↳\s]+/, ""
 /* Context the in-Figma helpers need, kept small. */
 function ctxBlob(ctx) {
   const ex = {};
-  for (const [k, v] of Object.entries(ctx.exemplars || {})) ex[k] = { id: v.id, key: v.key, setKey: v.setKey, props: Object.fromEntries(Object.entries(v.props || {}).filter(([pk]) => !/#/.test(pk))) };
+  for (const [k, v] of Object.entries(ctx.exemplars || {})) ex[k] = { id: v.id, key: v.key, setKey: v.setKey, uses: v.uses || 0, props: Object.fromEntries(Object.entries(v.props || {}).filter(([pk]) => !/#/.test(pk))) };
   const styles = {};
-  for (const [k, v] of Object.entries(ctx.styles || {})) styles[k] = [v.id || null, v.key];
+  for (const [k, v] of Object.entries(ctx.styles || {})) styles[k] = [v.id || null, v.key, v.size || 0, v.n || 0];
   const rv = roleVars(ctx);
   const vars = Object.fromEntries(Object.entries(rv).filter(([, v]) => v).map(([k, v]) => [k, { key: v.key, hex: v.hex }]));
   return { ex, styles, vars, screen: ctx.screenExemplar, featureCard: ctx.featureCard?.id || null };
 }
 
+/* use_figma accepts at most 50,000 characters of code per call. The helper prelude is sent with every
+   call, so it is compacted (no indentation or comment lines) and only carries the components a call uses. */
+export const CODE_LIMIT = 49000;
+export function compactJs(code) {
+  const out = [];
+  let inComment = false;
+  for (const raw of code.split("\n")) {
+    const l = raw.trim();
+    if (inComment) { if (l.includes("*/")) inComment = false; continue; }
+    if (!l || l.startsWith("//")) continue;
+    if (l.startsWith("/*")) { if (!l.includes("*/")) inComment = true; continue; }
+    out.push(l);
+  }
+  return out.join("\n");
+}
+const ROLE_HINT = /header|nav|table|cell|row|notification|alert|banner|toast|snack|callout|tab|modal|dialog|breadcrumb|button|input|field|dropdown|select|combo|tag|chip|badge|status|toggle|switch|checkbox|filter|pagination|card|progress|stepper/i;
+/* Components a piece of generated code can reach: the ones it names, plus those a role name can resolve to. */
+export function ctxFor(ctx, body, { none = false } = {}) {
+  if (none) return { ...ctx, exemplars: {} };
+  const ex = {};
+  for (const [k, v] of Object.entries(ctx.exemplars || {})) if (String(body || "").includes(k) || ROLE_HINT.test(k)) ex[k] = v;
+  return { ...ctx, exemplars: ex };
+}
 export function helpers(ctx, pageId) {
-  return `
+  return compactJs(`
 const CTX = ${JSON.stringify(ctxBlob(ctx))};
 const page = await figma.getNodeByIdAsync(${JSON.stringify(pageId)});
 await figma.setCurrentPageAsync(page);
@@ -62,7 +85,22 @@ const WARN = [];
 const hex = (h) => { h = String(h || "#000000").replace("#", ""); return { r: parseInt(h.slice(0, 2), 16) / 255, g: parseInt(h.slice(2, 4), 16) / 255, b: parseInt(h.slice(4, 6), 16) / 255 }; };
 const inAL = (p) => p && p.type !== "PAGE" && p.type !== "SECTION" && "layoutMode" in p && p.layoutMode !== "NONE";
 const _sty = {};
+/* Text styles: the generated code asks for generic names; files name theirs differently, so pick this file's closest style. */
+function styleFor(name) {
+  if (CTX.styles[name]) return name;
+  const ks = Object.keys(CTX.styles); if (!ks.length) return name;
+  const by = (re) => ks.filter((k) => re.test(k));
+  const most = (arr) => arr.sort((a, b) => (CTX.styles[b][3] || 0) - (CTX.styles[a][3] || 0))[0];
+  const big = (arr) => arr.sort((a, b) => (CTX.styles[b][2] || 0) - (CTX.styles[a][2] || 0))[0];
+  if (/h1|h2|section title|heading/i.test(name) && !/h3|h4|paragraph/i.test(name)) return big(by(/head|title|h[1-3]\b|display/i).filter((k) => (CTX.styles[k][2] || 0) <= 28)) || name;
+  if (/h3|h4|subsection|paragraph title/i.test(name)) return most(by(/h[3-5]\b|subtitle|subhead|title/i)) || name;
+  if (/caps/i.test(name)) return most(by(/caps|overline|eyebrow|label/i)) || name;
+  if (/small/i.test(name)) return most(by(/small|caption|body ?s\b|xs/i).filter((k) => !/bold/i.test(k) || /bold/i.test(name))) || name;
+  if (/bold/i.test(name)) return most(by(/bold|strong|semibold|medium/i).filter((k) => !/head|title/i.test(k))) || name;
+  return most(by(/paragraph|body|regular|default|text/i).filter((k) => !/bold|small|caps|head|title/i.test(k))) || most(ks) || name;
+}
 async function sty(name) {
+  name = styleFor(name);
   if (name in _sty) return _sty[name];
   let s = null; const d = CTX.styles[name] || [];
   if (d[0]) { try { s = await figma.getStyleByIdAsync(d[0]); } catch { s = null; } }
@@ -133,8 +171,42 @@ async function setTexts(node, values) {
   for (let i = 0; i < list.length && i < values.length; i++) { if (values[i] === undefined || values[i] === null) continue; await loadTextFonts(list[i]); list[i].characters = String(values[i]); }
   return list.length;
 }
+/* Every file names its components differently. A role name the generated code asks for ("App Header",
+   "Data Table", "Notification"…) resolves to this file's own component for that role. */
+const ROLES = [
+  ["App Header", /^(app ?header|header|top ?bar|app ?bar|nav ?bar|global header|masthead)\b/i, /notification|item|cell/i],
+  ["Sidebar Navigation", /side ?nav|sidebar|side navigation|left nav|navigation rail|nav rail/i, /items?\b/i],
+  ["Data Table", /^(data ?table|table)\b/i, null],
+  ["Notification", /notification|inline (message|alert)|^alert|banner|callout|toast|snackbar/i, /^header notification/i],
+  ["Tabs Navigation", /^tabs\b|tab ?bar|tab ?navigation|tab group/i, null],
+  ["Tab", /^tab\b/i, /tabs|navigation/i],
+  ["Modal", /modal|dialog/i, null],
+  ["Breadcrumb", /bread ?crumb/i, null],
+  ["Button", /^button$|^button\b(?!.*(icon|group|menu|hierarch))/i, null],
+  ["Input", /^(input|text ?field|text input)\b/i, null],
+  ["Dropdown", /dropdown|select\b|combo ?box/i, /menu list/i],
+  ["Tag", /^(tag|chip|badge|status)\b/i, null],
+  ["Toggle", /toggle|switch/i, null],
+  ["Checkbox", /checkbox/i, null],
+  ["Filter", /filter/i, null],
+  ["Advanced Pagination", /pagination/i, null],
+  ["Card", /^card\b/i, null],
+  ["Progress Indicator", /progress|stepper/i, null],
+];
+function resolveName(name) {
+  if (CTX.ex[name]) return name;
+  const keys = Object.keys(CTX.ex);
+  const low = String(name).toLowerCase();
+  const exact = keys.find((k) => k.toLowerCase() === low);
+  if (exact) return exact;
+  const role = ROLES.find(([r]) => r.toLowerCase() === low);
+  if (role) { const hit = keys.filter((k) => role[1].test(k) && !(role[2] && role[2].test(k))).sort((a, b) => (CTX.ex[b].uses || 0) - (CTX.ex[a].uses || 0))[0]; if (hit) return hit; }
+  const loose = keys.find((k) => k.toLowerCase().includes(low) || low.includes(k.toLowerCase()));
+  return loose || name;
+}
 const _ex = {};
 async function exNode(name) {
+  name = resolveName(name);
   if (name in _ex) return _ex[name];
   const e = CTX.ex[name];
   let n = null; if (e) { try { n = await figma.getNodeByIdAsync(e.id); } catch {} }
@@ -149,6 +221,7 @@ function applyProps(inst, props) {
   }
 }
 async function I(parent, name, o = {}) {
+  name = resolveName(name);
   const e = CTX.ex[name];
   let comp = null;
   const exn = await exNode(name);
@@ -178,7 +251,24 @@ async function clone(parent, name, o = {}) {
   size(c, parent, o);
   return c;
 }
+async function cellTable(parent, headers, rows, o) {
+  const H = Object.keys(CTX.ex).find((k) => /^_?header ?item|header ?cell|table ?header/i.test(k));
+  const C = Object.keys(CTX.ex).find((k) => /^_?cell|table ?cell/i.test(k));
+  const t = await F(parent, { name: o.name || "Data Table", fillW: o.fillW !== false, gap: 0, bg: "surface" });
+  const row = async (vals, comp, nm) => {
+    const rw = await F(t, { name: nm, dir: "H", fillW: true, gap: 0 });
+    for (const v of vals) {
+      if (comp) { const c = await I(rw, comp, { text: String(v) }); try { c.layoutSizingHorizontal = "FILL"; } catch {} }
+      else { const c = await F(rw, { fillW: true, px: 12, py: 10 }); await T(c, String(v), { style: nm === "Header" ? "Paragraph/Small/Caps" : "Paragraph/Default/Regular", color: nm === "Header" ? "textSecondary" : "textPrimary", fillW: true }); }
+    }
+  };
+  await row(headers, H, "Header");
+  for (let i = 0; i < Math.min(rows.length, 10); i++) await row(rows[i], C, "Row " + (i + 1));
+  if (!H || !C) WARN.push("table built from text styles (no table component on the reference page)");
+  return t;
+}
 async function table(parent, headers, rows, o = {}) {
+  if (!(await exNode("Data Table"))) return cellTable(parent, headers, rows, o);
   const dt = await clone(parent, "Data Table", { fillW: o.fillW !== false, name: o.name || "Data Table" });
   const heads = dt.findAll((n) => n.type === "INSTANCE" && /^_HeaderItem/.test(n.name));
   for (let i = 0; i < heads.length; i++) { if (i < headers.length) await setTexts(heads[i], [headers[i]]); else heads[i].visible = false; }
@@ -193,24 +283,90 @@ async function table(parent, headers, rows, o = {}) {
   if (rows.length > rws.length) WARN.push("table rows capped at " + rws.length);
   return dt;
 }
+const CHROME = /header|top ?bar|app ?bar|nav ?bar|side ?nav|sidebar|navigation|brow?swer|status ?bar|footer|logo|masthead|sticky/i;
+function isChrome(n) { return CHROME.test(n.name) && !/^content|^main|^body$/i.test(n.name); }
+/* The auto-layout container that holds the page's content: named content/main, else the largest auto-layout
+   frame that holds no app chrome. */
+function findContent(desk) {
+  if (!desk || !("findAll" in desk)) return null;
+  const al = desk.findAll((n) => n.type === "FRAME" && n.layoutMode && n.layoutMode !== "NONE" && n.width >= desk.width * 0.45 && n.height >= desk.height * 0.3);
+  const named = al.filter((n) => /^(content|main|page content|main content)\b/i.test(n.name));
+  if (named.length) return named[named.length - 1];
+  const clean = al.filter((n) => !n.findOne((k) => k.type === "INSTANCE" && isChrome(k)) && n !== desk);
+  clean.sort((a, b) => b.width * b.height - a.width * a.height);
+  return clean[0] || null;
+}
+/* Removes what sits around the content area but isn't app chrome: tooltips, annotations, stray shapes. */
+function prune(desk, content) {
+  let node = content;
+  while (node && node.parent && node !== desk) {
+    const parent = node.parent;
+    for (const sib of [...parent.children]) { if (sib !== node && !(sib.type === "INSTANCE" && isChrome(sib)) && !(sib.type === "FRAME" && isChrome(sib))) sib.remove(); }
+    node = parent;
+  }
+}
+async function clearContent(content, crumbs) {
+  for (const c of [...content.children]) { if (!(c.type === "INSTANCE" && /bread ?crumb/i.test(c.name))) c.remove(); }
+  const bc = content.children.find((c) => /bread ?crumb/i.test(c.name));
+  if (bc && crumbs && crumbs.length) await crumbsTo(bc, crumbs);
+  else if (crumbs && crumbs.length && CTX.ex[resolveName("Breadcrumb")]) { const b = await I(content, "Breadcrumb"); await crumbsTo(b, crumbs); }
+}
+/* Absolute-positioned screens: keep chrome along the top and left edges, remove the rest, and add an
+   auto-layout Content frame in the space that is left. */
+async function carveContent(desk, crumbs) {
+  let x0 = 0, y0 = 0;
+  for (const c of [...desk.children]) {
+    const top = c.y <= 4 && c.width >= desk.width * 0.6 && c.height <= 140;
+    const left = c.x <= 4 && c.width <= 340 && c.height >= desk.height * 0.5;
+    if (top || left || (c.type === "INSTANCE" && isChrome(c))) {
+      if (top) y0 = Math.max(y0, c.y + c.height);
+      if (left) x0 = Math.max(x0, c.x + c.width);
+      continue;
+    }
+    if (/bread ?crumb/i.test(c.name)) { y0 = Math.max(y0, c.y + c.height); continue; }
+    c.remove();
+  }
+  const content = await F(desk, { name: "Content", w: Math.round(desk.width - x0), pad: 24, gap: 16 });
+  content.x = x0; content.y = y0;
+  const bc = desk.children.find((c) => /bread ?crumb/i.test(c.name));
+  if (bc && crumbs && crumbs.length) await crumbsTo(bc, crumbs);
+  else if (crumbs && crumbs.length && CTX.ex[resolveName("Breadcrumb")]) { const b = await I(content, "Breadcrumb"); await crumbsTo(b, crumbs); }
+  GROW.push([desk.id, content.id]);
+  return content;
+}
+const GROW = [];
+async function growShells() {
+  for (const [d, c] of GROW) { const desk = await figma.getNodeByIdAsync(d), ct = await figma.getNodeByIdAsync(c); if (desk && ct) { const need = ct.y + ct.height + 24; if (need > desk.height) desk.resize(desk.width, need); } }
+}
 async function shell(spec) {
   const { id, name, state, acs, desc, crumbs, index } = spec;
   const full = id + " · " + name + (state ? " · " + state : "");
   let frame, content;
   const ex = CTX.screen ? await figma.getNodeByIdAsync(CTX.screen) : null;
-  if (ex) {
+  const captioned = ex && ex.children && ex.children[0] && /^caption/i.test(ex.children[0].name) && ex.children[1];
+  if (ex && captioned) {
     frame = ex.clone();
     frame.name = full;
     const cap = frame.children[0];
     if (cap) { cap.name = "Caption · " + id; await setTexts(cap, [full, acs || "", desc || ""]); }
     const desk = frame.children[1];
     if (desk) desk.name = id + " · Desktop / " + name + (state ? " · " + state : "");
-    content = frame.findOne((n) => n.type === "FRAME" && n.name === "Content");
-    if (content) {
-      for (const c of [...content.children]) { if (!(c.type === "INSTANCE" && /Breadcrumb/.test(c.name))) c.remove(); }
-      const bc = content.children[0];
-      if (bc && crumbs && crumbs.length) await crumbsTo(bc, crumbs);
-    }
+    content = findContent(desk) || desk;
+    await clearContent(content, crumbs);
+  } else if (ex) {
+    /* Reference screens without a caption (any naming): keep the file's own shell, chrome included, and
+       empty only its content area. */
+    frame = await F(page, { name: full, w: Math.round(ex.width), gap: 24 });
+    const cap = await F(frame, { name: "Caption · " + id, fillW: true, gap: 8 });
+    await T(cap, full, { style: "Heading/(H2) Section Title", fillW: true });
+    await T(cap, acs || "", { style: "Paragraph/Default/Regular", color: "textSecondary", fillW: true });
+    await T(cap, desc || "", { style: "Paragraph/Default/Regular", color: "textSecondary", fillW: true });
+    const desk = ex.clone();
+    frame.appendChild(desk);
+    desk.name = id + " · Desktop / " + name + (state ? " · " + state : "");
+    content = findContent(desk);
+    if (content) { prune(desk, content); await clearContent(content, crumbs); if (content.layoutMode && content.layoutMode !== "NONE") { try { content.primaryAxisSizingMode = "AUTO"; } catch {} } }
+    else content = await carveContent(desk, crumbs);
   } else {
     frame = await F(page, { name: full, w: 1366, gap: 24 });
     const cap = await F(frame, { name: "Caption · " + id, fillW: true, gap: 8 });
@@ -265,7 +421,7 @@ async function pageHeader(content, title, actions = []) {
   for (const a of actions) await I(h, "Button", { props: a.props || {}, text: a.label || a });
   return h;
 }
-`;
+`);
 }
 
 export function createPageCode({ pageName, anchorId, ctx, card }) {
@@ -334,12 +490,14 @@ return { section: s.id, w: s.width, h: s.height };`;
 }
 
 /* Handoff + Comparison sections, styled like the reference cards (deterministic). */
-export function docsCode(ctx, pageId, mainId, data) {
-  return `${helpers(ctx, pageId)}
+/* Handoff and Comparison, built over as many calls as the 50,000-character limit needs. Each part adds
+   cards to its section (created by the first part, found by name after that). */
+const clip = (v, n = 320) => { const t = String(v ?? ""); return t.length > n ? t.slice(0, n - 1) + "…" : t; };
+function docsPartCode(ctx, pageId, mainId, part) {
+  return `${helpers(ctxFor(ctx, "", { none: true }), pageId)}
 const SECTION_ID = null;
-const D = ${JSON.stringify(data)};
+const P = ${JSON.stringify(part)};
 const main = await figma.getNodeByIdAsync(${JSON.stringify(mainId)});
-let X = main.x + main.width + 200;
 async function card(parent, title, note, cols, rows) {
   const c = await F(parent, { name: "Card · " + title, w: 1700, pad: 24, gap: 16, radius: 4, bg: "surface" });
   await T(c, title, { style: "Heading/(H3) Subsection Title", w: 1652 });
@@ -355,34 +513,57 @@ async function card(parent, title, note, cols, rows) {
   }
   return c;
 }
-async function sectionWith(name, frameName, title, subtitle, cards) {
-  const s = figma.createSection(); s.name = name; page.appendChild(s); s.x = X; s.y = 200;
-  const f = await F(s, { name: frameName, w: 1700, gap: 24 });
-  f.x = 100; f.y = 100;
-  await T(f, title, { style: "Heading/(H2) Section Title", w: 1700 });
-  await T(f, subtitle, { style: "Paragraph/Default/Regular", color: "textSecondary", w: 1700 });
-  for (const k of cards) {
-    if (k.kpis) {
-      const row = await F(f, { name: "KPIs · Scope facts", dir: "H", w: 1700, gap: 16 });
-      for (const [label, value] of k.kpis) { const b = await F(row, { name: "KPI · " + label, fillW: true, pad: 24, gap: 4, radius: 4, bg: "surface" }); await T(b, value, { style: "Heading/(H2) Section Title", fillW: true }); await T(b, label, { style: "Paragraph/Small/Regular", color: "textSecondary", fillW: true }); }
-      continue;
-    }
-    await card(f, k.title, k.note, k.cols, k.rows);
-  }
-  s.resizeWithoutConstraints(1900, f.height + 200);
-  X += 1900 + 200;
+let s = page.children.find((c) => c.type === "SECTION" && c.name === P.name);
+let f;
+if (!s) {
+  const right = Math.max(main.x + main.width, ...page.children.filter((c) => c.type === "SECTION").map((c) => c.x + c.width));
+  s = figma.createSection(); s.name = P.name; page.appendChild(s); s.x = right + 200; s.y = 200;
+  f = await F(s, { name: P.frame, w: 1700, gap: 24 }); f.x = 100; f.y = 100;
+  await T(f, P.title, { style: "Heading/(H2) Section Title", w: 1700 });
+  await T(f, P.sub, { style: "Paragraph/Default/Regular", color: "textSecondary", w: 1700 });
   CREATED.push(s.id);
-  return s;
+} else f = s.children.find((c) => c.type === "FRAME" && c.name === P.frame);
+for (const k of P.cards) {
+  if (k.kpis) {
+    const row = await F(f, { name: "KPIs · Scope facts", dir: "H", w: 1700, gap: 16 });
+    for (const [label, value] of k.kpis) { const b = await F(row, { name: "KPI · " + label, fillW: true, pad: 24, gap: 4, radius: 4, bg: "surface" }); await T(b, value, { style: "Heading/(H2) Section Title", fillW: true }); await T(b, label, { style: "Paragraph/Small/Regular", color: "textSecondary", fillW: true }); }
+    continue;
+  }
+  await card(f, k.title, k.note, k.cols, k.rows);
 }
-await sectionWith(D.handoffName, "Handoff", D.handoffTitle, D.handoffSub, D.handoff);
-await sectionWith(D.comparisonName, "Comparison", D.comparisonTitle, D.comparisonSub, D.comparison);
+s.resizeWithoutConstraints(1900, f.height + 200);
 return { created: CREATED, warnings: [...new Set(WARN)] };`;
+}
+export function docsCalls(ctx, pageId, mainId, data) {
+  const calls = [];
+  const sections = [[data.handoffName, "Handoff", data.handoffTitle, data.handoffSub, data.handoff], [data.comparisonName, "Comparison", data.comparisonTitle, data.comparisonSub, data.comparison]];
+  for (const [name, frame, title, sub, cards] of sections) {
+    let part = { name, frame, title, sub, cards: [] };
+    const flush = () => { if (part.cards.length) calls.push(docsPartCode(ctx, pageId, mainId, part)); part = { name, frame, title, sub, cards: [] }; };
+    for (const k0 of cards) {
+      const k = k0.kpis ? k0 : { ...k0, title: clip(k0.title, 120), note: clip(k0.note, 300), rows: k0.rows.map((r) => r.map((c) => clip(c))) };
+      /* A card bigger than one call on its own is split by rows. */
+      const pieces = [];
+      if (k.rows && docsPartCode(ctx, pageId, mainId, { ...part, cards: [k] }).length > CODE_LIMIT) {
+        let cur = { ...k, rows: [] };
+        for (const row of k.rows) { const next = { ...cur, rows: [...cur.rows, row] }; if (cur.rows.length && docsPartCode(ctx, pageId, mainId, { ...part, cards: [next] }).length > CODE_LIMIT) { pieces.push(cur); cur = { ...k, title: k.title + " (cont.)", note: "", rows: [row] }; } else cur = next; }
+        pieces.push(cur);
+      } else pieces.push(k);
+      for (const piece of pieces) {
+        if (part.cards.length && docsPartCode(ctx, pageId, mainId, { ...part, cards: [...part.cards, piece] }).length > CODE_LIMIT) flush();
+        part.cards.push(piece);
+      }
+    }
+    flush();
+  }
+  return calls;
 }
 
 export function screensCode(ctx, pageId, sectionId, body) {
-  return `${helpers(ctx, pageId)}
+  return `${helpers(ctxFor(ctx, body), pageId)}
 const SECTION_ID = ${JSON.stringify(sectionId)};
 ${body}
+await growShells();
 return { created: CREATED, warnings: [...new Set(WARN)] };`;
 }
 
@@ -469,12 +650,12 @@ BRIEF:
 ${brief}`;
 }
 
-export function batchPrompt(brief, contextText, screens, draftId, prevError) {
+export function batchPrompt(brief, contextText, screens, draftId, prevError, maxChars = 12000) {
   return `You write Figma Plugin API JavaScript that builds product screens inside an existing design file, reusing its library components exactly the way the reference page does.
 
 Your code runs after a prelude that switched to the right page and defines these async helpers. Use ONLY them (no figma.create*, no setCurrentPageAsync, no return, no IIFE). Top-level await is allowed; await every helper.
 - const { frame, content } = await shell({ id, name, state, acs, desc, crumbs, index })
-    Creates one screen by cloning the reference screen: caption (title · AC line · description), App Header, Sidebar Navigation and Breadcrumb, placed in the Main design grid. content = the vertical auto-layout Content frame (24px padding, gap 16, 1246px inner width). index = 0-based position of the screen on the page (given below).
+    Creates one screen by cloning the reference screen of THIS file: caption (title · AC line · description) plus the file's own app chrome (header, navigation, breadcrumb), placed in the Main design grid. content = the vertical auto-layout content frame of that screen (its width follows the reference). index = 0-based position of the screen on the page (given below).
 - await pageHeader(content, "Title", [{ label: "Action", props: { Hierachy: "Secondary" } }])  → title row with library Buttons.
 - await I(parent, "<Library component name>", { props: { Variant: "value" }, text: "label" | ["t1","t2"], fillW, w, h, name })  → library instance; props are variant/boolean properties shown in the context; text sets the component's text property or its text layers in order.
 - await clone(parent, "<Library component name>", { fillW, name })  → exact copy of the reference instance (composites such as "Filter" or "Advanced Pagination"); then await setTexts(node, ["text 1", ...]) to change its visible texts in order.
@@ -488,9 +669,11 @@ Rules:
 - Build exactly these screens, in order:
 ${screens.map((s) => `  index ${s.index}: ${JSON.stringify({ id: s.id, name: s.name, state: s.state, acs: s.acs, desc: s.desc, crumbs: s.crumbs })}`).join("\n")}
 - Follow the reference anatomy order inside Content: Breadcrumb (from shell) → Page header → context line (Paragraph/Small/Regular, textSecondary) → Tabs / filters → dataset title + actions → summary line → Data Table / form / message → secondary actions.
+- Component names: use the names listed under "Library components available" in the context. Role names (App Header, Sidebar Navigation, Data Table, Notification, Tabs Navigation, Tab, Modal, Breadcrumb, Button, Input, Dropdown, Tag, Toggle, Checkbox, Filter, Advanced Pagination, Card) are mapped to this file's equivalent automatically, so they are safe too. Never invent other names.
+- Build every control from a library component (buttons, inputs, dropdowns, toggles, tags, tabs, tables, messages, dialogs). Plain frames only for layout; T only for headings and body text.
 - Prefer library components over frames. Use real labels and realistic sample data from the brief. Status always as Tag with words. One primary Button per screen.
 - Dialogs/warnings: build the underlying screen, then a Notification or a centered card frame on top using F with bg "surface".
-- Keep it under ${Math.min(16000, 4500 * screens.length)} characters. Define small local helper functions to avoid repetition.
+- HARD LIMIT: under ${Math.min(maxChars, 4500 * screens.length).toLocaleString()} characters in total (Figma rejects longer code). Define small local helper functions and loops to avoid repetition; keep sample data short.
 - Answer with JavaScript only. No Markdown fences, no prose.${prevError ? `\n- The previous attempt failed with: ${prevError}. Avoid it.` : ""}
 
 ${contextText}

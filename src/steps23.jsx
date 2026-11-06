@@ -1,5 +1,5 @@
 import React, { useState } from "react";
-import { Lightbulb as Bulb, History, Sparkles, Loader2, FileText, CheckCircle2, AlertTriangle, XCircle, Copy, Download, Layers, GitCompare, ListChecks, MessageSquareWarning, Accessibility, Lightbulb, HelpCircle, Check, Plus, Trash2, Send } from "lucide-react";
+import { Lightbulb as Bulb, History, Sparkles, Loader2, FileText, CheckCircle2, AlertTriangle, XCircle, Copy, Download, Layers, GitCompare, ListChecks, MessageSquareWarning, Accessibility, Lightbulb, HelpCircle, Check, Plus, Trash2, Send, Wand2 } from "lucide-react";
 import { STATUSES } from "./engine.js";
 import { Badge, Btn, Editable, Field, inputCls, copyText, ratingTone, ratingIcon, statusTone, prdTone, prdLabel } from "./ui.jsx";
 /* ---------------- Step 2 ---------------- */
@@ -355,10 +355,18 @@ function ReviewBoard({ res, setRes }) {
   );
 }
 
-export function Step3({ cfg, res, setRes }) {
+export function Step3({ cfg, res, setRes, onMatrices, mxBusy, mxProgress, aiLabel }) {
   const [tab, setTab] = useState("validation");
+  const empty = !res.validation.length || !res.drift.length;
+  const fallback = /^Local rules/.test(res.matricesBy || "");
   return (
     <div className="flex flex-col gap-4">
+      {(empty || fallback) && (
+        <div role="status" className="flex flex-wrap items-center justify-between gap-3 rounded-lg border border-warn-fg/30 bg-warn-bg px-4 py-3 text-sm text-warn-fg">
+          <p className="max-w-[80ch]">{mxBusy ? (mxProgress || "Building the matrices…") : empty ? "The matrices are empty: the AI's answer for this ADO was cut off before it reached them (long work items did this before this update). Build them now; your PRD, stories and gaps stay as they are." : `${res.matricesBy}. You can try the AI again.`}</p>
+          <Btn variant="primary" icon={mxBusy ? Loader2 : Wand2} disabled={mxBusy} onClick={onMatrices}>{mxBusy ? "Building…" : `Build matrices · ${aiLabel}`}</Btn>
+        </div>
+      )}
       <Tabs value={tab} onChange={setTab} tabs={[["validation", "A · AC validation matrix", ListChecks, res.validation.length], ["drift", "B · System & regional drift", GitCompare, res.drift.length], ["board", "Review notes board (Figma)", Layers]]} />
       {tab === "validation" && <ValidationMatrix res={res} setRes={setRes} />}
       {tab === "drift" && <DriftMatrix res={res} setRes={setRes} dsName={cfg.dsName} />}

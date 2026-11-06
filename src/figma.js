@@ -18,6 +18,7 @@ const ERR = {
   upstream_error: "Figma returned an error. Check the file before trying again.",
   rate_limited: "Too many Figma requests. Wait a minute and try again.",
   cancelled: "Stopped.",
+  too_big: "The code for this step was over Figma's 50,000-character limit. Try again: the app now splits and shortens it.",
 };
 export const figmaErrorText = (e) => {
   if (e?.code === "tool_error") {
@@ -48,6 +49,7 @@ async function useFigmaInput(mcp, fileKey, code, description) {
 }
 
 export async function runInFigma(mcp, fileKey, code, description) {
+  if (String(code).length > 50000) throw Object.assign(new Error(`The Figma code is ${String(code).length.toLocaleString()} characters; Figma accepts up to 50,000.`), { code: "too_big" });
   const input = await useFigmaInput(mcp, fileKey, code, description);
   const res = await mcp.callTool("Figma", "use_figma", input, { cache: false });
   let out = res.payload;

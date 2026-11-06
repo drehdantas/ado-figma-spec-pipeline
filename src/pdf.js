@@ -41,7 +41,7 @@ export function buildPdf({ ado, res, sections, poQuestions }) {
   text(res.ux.problem, { gap: 8 });
   text(`Stories: ${res.stories.length} (${rc["Strong"] || 0} strong, ${rc["Needs Clarification"] || 0} need clarification, ${rc["Critical Gap"] || 0} critical gaps)   ·   ACs: ${v.length} (${v.filter((r) => r.status === "Designed").length} designed, ${v.filter((r) => r.status.startsWith("Doc")).length} documented only, ${v.filter((r) => r.status === "Blocked").length} blocked)`, { size: 9, color: muted });
 
-  if (ado.designerNotes) { h2("Designer comments"); text(ado.designerNotes, { size: 10, gap: 6 }); }
+  if (ado.designerNotes?.trim()) { h2("Designer comments"); text(String(ado.designerNotes).replace(/!\[([^\]]*)\]\([^)]*\)/g, (_, alt) => `[Image${alt ? ": " + alt : ""}]`), { size: 10, gap: 6 }); }
   h2(`2. Questions for ${ado.po || "the Product Owner"} (${poQuestions.length})`);
   poQuestions.forEach((q, i) => {
     need(46);

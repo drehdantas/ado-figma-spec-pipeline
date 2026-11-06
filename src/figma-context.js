@@ -14,22 +14,36 @@ for (const n of page.children) {
   if (n.type === "SECTION" && n.fills?.[0]) o.fill = hexOf(n.fills[0]);
   out.top.push(o);
 }
-// Screens: frames whose name starts with a journey id, inside sections or at top level
-const screenFrames = page.findAll((n) => n.type === "FRAME" && /^[A-Z]\\d+(\\.\\d+)+\\s*·/.test(n.name) && (n.parent.type === "SECTION" || n.parent.type === "PAGE"));
+// Screens: frames named with a journey id (J4.1.1.1 · …). Files that name screens freely ("Order details",
+// "Checkout - Web Desktop") are detected by shape instead: large frames in sections or on the page that use library instances.
+const NAMED = /^[A-Z]\\d+(\\.\\d+)+\\s*·/;
+const topFrames = page.findAll((n) => n.type === "FRAME" && (n.parent.type === "SECTION" || n.parent.type === "PAGE"));
+let screenFrames = topFrames.filter((n) => NAMED.test(n.name));
+const instCount = (f) => { try { return f.findAllWithCriteria({ types: ["INSTANCE"] }).length; } catch { return 0; } };
+if (!screenFrames.length) {
+  screenFrames = topFrames.filter((f) => f.width >= 960 && f.height >= 560).map((f) => ({ f, n: instCount(f) })).filter((x) => x.n >= 3).sort((a, b) => b.n - a.n).map((x) => x.f);
+  out.screensBy = "shape";
+}
 out.screens = screenFrames.slice(0, 40).map((f) => ({ id: f.id, name: f.name, w: R(f.width), h: R(f.height), x: R(f.x), y: R(f.y), parent: f.parent.name }));
-// Exemplars: first instance of each component (set) on the page
-const insts = page.findAllWithCriteria({ types: ["INSTANCE"] });
-const seen = new Set();
+// Exemplars: the library components the page actually uses, most used first. Icons, browser chrome and
+// private sub-parts are skipped so they don't crowd out headers, navigation, tables, forms and messages.
+const SKIP = /^_|^\\d+px\\/|^icon\\b|\\bicons?\\s*\\/|^(Navigation|Action|Hardware|Content|Social|Editor|AudioVideo|Alert|Communication|Image|Device|File|Maps|Places|Toggle)\\/|brow?swer|checkmark|scroller|^cursor/i;
+const insts = page.findAllWithCriteria({ types: ["INSTANCE"] }).slice(0, 4000);
+const tally = new Map();
 for (const i of insts) {
-  if (Object.keys(out.exemplars).length >= 45) break;
+  if (i.width <= 24 && i.height <= 24) continue;
   let mc; try { mc = await i.getMainComponentAsync(); } catch {}
   if (!mc) continue;
   const set = mc.parent && mc.parent.type === "COMPONENT_SET" ? mc.parent : null;
   const nm = set ? set.name : mc.name;
-  if (seen.has(nm) || /^_|^(Navigation|Action|Hardware|Content|Social|Editor|AudioVideo|Alert|Communication|Image|Device|File|Maps|Places|Toggle)\\//.test(nm)) continue;
-  seen.add(nm);
+  if (SKIP.test(nm) && !/^_(cell|header ?item|row)/i.test(nm)) continue;
+  const t = tally.get(nm);
+  if (t) { t.n++; continue; }
+  tally.set(nm, { n: 1, i, mc, set });
+}
+for (const [nm, { n, i, mc, set }] of [...tally.entries()].sort((a, b) => b[1].n - a[1].n).slice(0, 60)) {
   let props = {}; try { props = Object.fromEntries(Object.entries(i.componentProperties).map(([k, v]) => [k, v.value])); } catch {}
-  out.exemplars[nm] = { id: i.id, key: mc.key, setKey: set ? set.key : null, variant: mc.name, props, w: R(i.width), h: R(i.height), texts: i.findAll((t) => t.type === "TEXT").slice(0, 6).map((t) => t.name) };
+  out.exemplars[nm] = { id: i.id, key: mc.key, setKey: set ? set.key : null, variant: mc.name, props, uses: n, w: R(i.width), h: R(i.height), texts: i.findAll((t) => t.type === "TEXT").slice(0, 6).map((t) => t.name) };
 }
 // Text styles and color variables in use
 const texts = page.findAllWithCriteria({ types: ["TEXT"] }).slice(0, 2500);
@@ -125,7 +139,7 @@ export function contextSummary(ctx) {
 
 /* Compact text the screen-writing prompt gets. */
 export function contextForPrompt(ctx) {
-  const ex = Object.entries(ctx.exemplars).map(([k, v]) => `- ${k}: variant {${Object.entries(v.props || {}).filter(([pk]) => !/#/.test(pk)).map(([pk, pv]) => `${pk}=${pv}`).join(", ")}}${Object.keys(v.props || {}).some((pk) => /^Text#/.test(pk)) ? " · text prop" : ""} · ${v.w}x${v.h}`).join("\n");
+  const ex = Object.entries(ctx.exemplars).map(([k, v]) => `- ${k}: variant {${Object.entries(v.props || {}).filter(([pk]) => !/#/.test(pk)).map(([pk, pv]) => `${pk}=${pv}`).join(", ")}}${Object.keys(v.props || {}).some((pk) => /^Text#/.test(pk)) ? " · text prop" : ""} · ${v.w}x${v.h}${v.uses ? ` · used ${v.uses}×` : ""}`).join("\n");
   const sitemap = ctx.sitemap.map((p) => p.name).join("\n");
   const refScreens = ctx.refs.flatMap((r) => (r.screens || []).map((s) => `- ${s.name} (${s.w}x${s.h})`)).slice(0, 30).join("\n");
   return `FIGMA FILE CONTEXT (read from the file before designing)

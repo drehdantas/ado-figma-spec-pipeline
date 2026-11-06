@@ -1,11 +1,12 @@
 import React, { useMemo, useRef } from "react";
 import { FileText, AlertTriangle, ArrowRight, Wand2, Square, Cpu, Link2, User, Users, Hash, Filter, MessageSquareText } from "lucide-react";
 import { Btn, Field, inputCls } from "./ui.jsx";
+import { ProductField } from "./drawer.jsx";
 import { extractACs, extractStories } from "./engine.js";
 import { MarkdownEditor, mdForPrompt, imageRefs } from "./mdeditor.jsx";
 import { DEMO_ADO } from "./sample/demo.js";
 
-export function Step1({ ado, setAdo, updAdo, engine, setEngine, aiLabel, run, busy, progress, stop, err, upToDate, assets, notify }) {
+export function Step1({ product, productInfo, setProductName, ado, setAdo, updAdo, engine, setEngine, aiLabel, run, busy, progress, stop, err, upToDate, assets, notify }) {
   const plain = useMemo(() => mdForPrompt(ado.raw), [ado.raw]);
   const stories = useMemo(() => extractStories(plain), [plain]);
   const acs = useMemo(() => extractACs(plain), [plain]);
@@ -25,6 +26,7 @@ export function Step1({ ado, setAdo, updAdo, engine, setEngine, aiLabel, run, bu
           </Field>
         </div>
         {String(ado.stakeholders || "").trim() && <div className="-mt-2 flex flex-wrap gap-1">{String(ado.stakeholders).split(/[,;]/).map((x) => x.trim()).filter(Boolean).map((x) => <span key={x} className="rounded-full bg-surface-2 px-2 py-0.5 text-xs">{x}</span>)}</div>}
+        <div className="max-w-xl"><ProductField id="productNameStep1" value={product} info={productInfo} onCommit={setProductName} /></div>
         <div className="flex min-w-0 flex-col gap-1">
           <label htmlFor="adoRaw" className="text-[11px] font-semibold uppercase tracking-wider text-muted">Raw ADO feature story, description, business logic and acceptance criteria</label>
           <MarkdownEditor id="adoRaw" value={ado.raw} onChange={(raw) => updAdo((a) => ({ ...a, raw }))}
@@ -34,10 +36,11 @@ export function Step1({ ado, setAdo, updAdo, engine, setEngine, aiLabel, run, bu
         </div>
         <div className="flex min-w-0 flex-col gap-1 rounded-lg border border-line bg-surface p-3">
           <label htmlFor="designerNotes" className="flex items-center gap-1.5 text-[11px] font-semibold uppercase tracking-wider text-muted"><MessageSquareText size={12} aria-hidden="true" />Designer comments</label>
-          <p className="text-xs text-muted">Notes for the analysis: context the ADO doesn't say, decisions already made, constraints, research findings, screens to reuse, concerns to check. They're used in the PRD, the audit, suggestions, the Figma build and the prototype. Conflicts with the ADO are flagged as PO questions.</p>
-          <textarea id="designerNotes" rows={5} value={ado.designerNotes || ""} onChange={(e) => updAdo((a) => ({ ...a, designerNotes: e.target.value }))}
-            className="w-full resize-y rounded-md border border-line bg-surface p-2.5 text-sm leading-relaxed text-fg placeholder:text-muted focus:outline focus:outline-2 focus:outline-accent"
-            placeholder={"e.g. Reuse the existing user list pattern from J2.1. Admins mostly work on desktop. Research showed users miss the 14-day warning: make the countdown visible. Legal confirmed the anonymization can't be undone."} />
+          <p className="text-xs text-muted">Notes for the analysis, in Markdown: context the ADO doesn't say, decisions already made, constraints, research findings, screens to reuse, concerns to check. Paste or drop images (sketches, screenshots, research boards); they're sent to the AI with the ADO. Used in the PRD, the audit, suggestions, the Figma build and the prototype. Conflicts with the ADO are flagged as PO questions.</p>
+          <MarkdownEditor id="designerNotes" height="h-56" value={ado.designerNotes || ""} onChange={(designerNotes) => updAdo((a) => ({ ...a, designerNotes }))}
+            images={ado.images} onImages={(fn) => updAdo((a) => ({ ...a, images: fn(a.images) }))}
+            assets={assets} notify={notify}
+            placeholder={"e.g.\n- Reuse the existing user list pattern from J2.1.\n- Admins mostly work on desktop.\n- Research: users miss the 14-day warning, so make the countdown visible.\n\nPaste a sketch or screenshot here too."} />
         </div>
       </div>
       <aside className="flex min-w-0 flex-col gap-4">

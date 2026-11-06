@@ -40,7 +40,7 @@ function SlotsCard({ cfg, setCfg, notify, downloads, guard }) {
   return (
     <div className="flex min-w-0 flex-col gap-3 rounded-lg border border-line bg-bg p-4">
       <div className="flex items-center justify-between gap-2">
-        <p className="flex items-center gap-1.5 text-[11px] font-semibold uppercase tracking-wider text-muted"><Package size={12} />Design system slots</p>
+        <p className="flex items-center gap-1.5 text-[11px] font-semibold uppercase tracking-wider text-muted"><Package size={12} />Design system slots · {cfg.productKey ? cfg.productName : "this pipeline"}</p>
         <Btn size="sm" icon={Plus} onClick={() => setAdding(true)}>Add slot</Btn>
       </div>
       <div role="radiogroup" aria-label="Design system in use" className="flex flex-col gap-2">
@@ -152,6 +152,22 @@ function UploadDialog({ slot, onClose, onFiles }) {
   );
 }
 
+/* Product / platform name: the only thing that links pipelines. Same name → same PRD template and design system,
+   and earlier ADOs of that product are used as references. Committed on blur or Enter so typing doesn't create products. */
+export function ProductField({ value, info, onCommit, id = "productName" }) {
+  const [draft, setDraft] = useState(value || "");
+  useEffect(() => { setDraft(value || ""); }, [value]);
+  const commit = () => { if (draft.trim() !== (value || "").trim()) onCommit(draft); };
+  const known = info.names.some((n) => n.trim().toLowerCase() === draft.trim().toLowerCase());
+  const editing = draft.trim() !== (value || "").trim();
+  return (
+    <Field label="Product / platform name" icon={Package} hint={editing ? (draft.trim() ? (known ? "Existing product: press Enter to use its PRD template and design system." : "New product: press Enter to create it from this pipeline's current setup.") : "Press Enter to keep this pipeline unlinked.") : value?.trim() ? (info.shared ? `Shares PRD template and design system with ${info.shared} other pipeline${info.shared > 1 ? "s" : ""}; their ADOs are used as references.` : "No other pipeline uses this product yet.") : "No product yet: this pipeline's template and design system are its own, and no other ADO is used as reference."}>
+      <input id={id} list={`${id}-list`} className={inputCls} value={draft} placeholder="e.g. Admin Console" onChange={(e) => setDraft(e.target.value)} onBlur={commit} onKeyDown={(e) => { if (e.key === "Enter") { e.preventDefault(); commit(); } if (e.key === "Escape") setDraft(value || ""); }} />
+      <datalist id={`${id}-list`}>{info.names.map((n) => <option key={n} value={n} />)}</datalist>
+    </Field>
+  );
+}
+
 function AICard({ cfg, setCfg, caps }) {
   const ai = cfg.ai;
   const [keys, setKeys] = useState(() => ({ openai: getKey("openai"), anthropic: getKey("anthropic"), gemini: getKey("gemini") }));
@@ -165,8 +181,7 @@ function AICard({ cfg, setCfg, caps }) {
   );
   return (
     <div className="flex min-w-0 flex-col gap-3 rounded-lg border border-line bg-bg p-4">
-      <p className="flex items-center gap-1.5 text-[11px] font-semibold uppercase tracking-wider text-muted"><Cpu size={12} />Workspace & AI provider</p>
-      <Field label="Product / platform name" hint="Used in every prompt, e.g. “Admin Console 2026”."><input id="productName" className={inputCls} value={cfg.productName} onChange={(e) => setCfg({ ...cfg, productName: e.target.value })} /></Field>
+      <p className="flex items-center gap-1.5 text-[11px] font-semibold uppercase tracking-wider text-muted"><Cpu size={12} />AI provider · all pipelines</p>
       <Field label="AI agent for analysis, suggestions and design">
         <select id="aiProvider" className={inputCls} value={p} onChange={(e) => setAI({ provider: e.target.value })}>
           <option value="auto">Automatic (best available)</option>
@@ -188,7 +203,7 @@ function AICard({ cfg, setCfg, caps }) {
   );
 }
 
-export function ContextDrawer({ cfg, setCfg, pipe, setPipe, notify, open, setOpen, caps, guard }) {
+export function ContextDrawer({ cfg, setCfg, pipe, setPipe, notify, open, setOpen, caps, guard, productInfo, setProductName }) {
   const [preview, setPreview] = useState(null);
   const [replaceTpl, setReplaceTpl] = useState(false);
   const [sync, setSync] = useState({ busy: null, err: "" });
@@ -221,11 +236,15 @@ export function ContextDrawer({ cfg, setCfg, pipe, setPipe, notify, open, setOpe
         </button>
         {open && (
           <div className="grid gap-4 pb-4 lg:grid-cols-2">
+            <div className="flex min-w-0 flex-col gap-2 rounded-lg border border-accent/40 bg-accent-soft/40 p-4 lg:col-span-2">
+              <div className="max-w-xl"><ProductField value={cfg.productNameRaw} info={productInfo} onCommit={setProductName} /></div>
+              <p className="text-xs text-muted-strong">Every pipeline has its own context. <span className="font-semibold">Shared by product:</span> PRD template, design-system slots and matrix style guide. <span className="font-semibold">Always this pipeline's own:</span> Figma target, source of truth, journey sitemap and node. Only pipelines with the same product name are used as references for suggestions.</p>
+            </div>
             <AICard cfg={cfg} setCfg={setCfg} caps={caps} />
             <div className="flex min-w-0 flex-col gap-3 rounded-lg border border-line bg-bg p-4">
               <div className="flex items-start justify-between gap-2">
                 <div className="min-w-0">
-                  <p className="flex items-center gap-1.5 text-[11px] font-semibold uppercase tracking-wider text-muted"><FileText size={12} />PRD template</p>
+                  <p className="flex items-center gap-1.5 text-[11px] font-semibold uppercase tracking-wider text-muted"><FileText size={12} />PRD template · {cfg.productKey ? cfg.productName : "this pipeline"}</p>
                   <p className="mt-1 truncate text-sm font-semibold" title={cfg.template.name}>{cfg.template.name}</p>
                   <p className="text-xs text-muted">Last updated {fmtDate(cfg.template.updatedAt)} · {cfg.template.sections.length} sections</p>
                 </div>
@@ -239,7 +258,7 @@ export function ContextDrawer({ cfg, setCfg, pipe, setPipe, notify, open, setOpe
             </div>
             <SlotsCard cfg={cfg} setCfg={setCfg} notify={notify} downloads={downloads} guard={guard} />
             <div className="flex min-w-0 flex-col gap-3 rounded-lg border border-line bg-bg p-4">
-              <p className="flex items-center gap-1.5 text-[11px] font-semibold uppercase tracking-wider text-muted"><Figma size={12} />Figma target & source of truth</p>
+              <p className="flex items-center gap-1.5 text-[11px] font-semibold uppercase tracking-wider text-muted"><Figma size={12} />Figma target & source of truth · this pipeline</p>
               <Field label="Target Figma file / branch URL" hint={pipe.figmaUrl && !parseFigmaUrl(pipe.figmaUrl) ? "Not a Figma file link yet" : pipe.figmaUrl ? `File key ${parseFigmaUrl(pipe.figmaUrl).fileKey}${parseFigmaUrl(pipe.figmaUrl).branch ? " (branch)" : ""}` : "Where this ADO's screens will be built"}>
                 <input id="figmaUrl" className={inputCls} value={pipe.figmaUrl} onChange={(e) => { const v = e.target.value; guard("Changing the target Figma file", () => setPipe({ figmaUrl: v })); }} placeholder="https://www.figma.com/design/…" />
               </Field>

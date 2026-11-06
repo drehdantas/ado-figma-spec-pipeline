@@ -5,7 +5,7 @@ Turn an Azure DevOps work item into everything a product designer needs before a
 1. **Raw ADO ingestion** – paste the feature as Markdown (text, tables and screenshots), with Product Owner and stakeholders, plus **designer comments**: notes the analysis must take into account (context, decisions, research, constraints).
 2. **Structured PRD & audit** – the work item mapped onto *your* PRD template, a readiness critique of every user story, the gaps to raise with the PO, and **suggested answers** for missing sections drawn from your earlier ADOs and from the AI acting as a UX designer. Export a PO review pack (copy or PDF).
 3. **Validation & drift matrices** – an acceptance-criteria validation matrix, a market / design-system drift matrix and a review-notes board, all editable and exportable (Markdown / CSV).
-4. **Prompt compiler & Figma** – one master prompt for any design or coding agent, a **one-click draft page in Figma** that follows how your file already builds screens, handoff and documentation, and a **navigable HTML prototype** of the journey for presentations and user tests.
+4. **Prompt compiler & Figma** – one master prompt for any design or coding agent, a **one-click draft page in Figma** that follows how your file already builds screens, handoff and documentation, and a **navigable prototype built from that Figma page** (offline `.zip` or `.html`) for presentations and user tests.
 
 Every work item is kept in a history list so the team can come back to it.
 
@@ -55,7 +55,7 @@ Publish `dist/artifact.html` as an artifact and grant these runtime capabilities
 
 Everything below is set in **Configuration & context** inside the app. Nothing is hard-coded to one company.
 
-- **Product / platform name** – used in every prompt.
+- **Product / platform name** – links pipelines. Each pipeline has its own context (Figma target, source of truth, sitemap, node); pipelines with the same product name share the PRD template, design-system slots and style guide, and only they are used as references for suggestions.
 - **AI provider** – Automatic, Claude (built in), OpenAI-compatible (OpenAI, Azure OpenAI, OpenRouter, Ollama, LM Studio…), Anthropic, Gemini, or **Any agent (copy & paste)**. API keys stay in your browser and are never saved with the workspace.
 - **PRD template** – upload your own `.docx`, `.md` or `.txt`; sections are detected from numbered headings (`2.1 Product Overview`). A neutral starter template is included.
 - **Design system slots** – create as many slots as you need (for example “Brand 100% strict” and “Product hybrid”), upload any number of packages (`.zip` of Markdown/JSON, or single files) into each, choose how strictly each slot applies, and download a slot back as `.zip`. An example package lives in [`examples/design-system`](examples/design-system).
@@ -72,16 +72,16 @@ Requires the Figma MCP server's `use_figma` tool (write access, beta): a Figma p
 
 ### Designer comments
 
-A free-text field under the raw ADO. The notes go into the analysis prompt (and the local rules engine), suggestions, the master prompt, the PO review pack PDF, the Figma build and the prototype. Where a note contradicts the ADO, the conflict is raised as a PO question. Editing the notes enables converting again.
+A Markdown field (text and images) under the raw ADO. The notes go into the analysis, suggestions, the master prompt, the PO review pack PDF, the Figma build and the prototype; images are sent to the AI with the ADO's. Conflicts with the ADO are raised as PO questions. Editing the notes enables converting again.
 
-### Navigable HTML prototype
+### Navigable prototype from Figma
 
-Step 4 builds one self-contained HTML file of the journey (no external requests, works offline):
+Available once the Figma page has been generated. The app exports each generated screen, turns its real buttons, tabs, links and fields into hotspots, and asks the AI (one short call) where each one leads; simple rules take over if no AI is available. Download it as a `.zip` (index.html, one image per screen, `flow.json`) or as one `.html` with the images embedded. Works offline. Keys: `←` `→` screens, `H` hotspots, `J` journey, `P` present.
 
-- **Interactive** (any AI provider): real interactions — tabs, filters, dialogs, toasts, empty and error states — with every screen linked so a tester can walk the journey end to end.
-- **Quick storyboard** (no AI): an instant click-through of the screens with captions.
+### Limits handled
 
-Screens come from the Figma plan when one exists, otherwise from the journey nodes of acceptance criteria marked *Designed*. Colours come from the active design system. Inside the prototype: `J` journey list, `P` present mode, `←` `→` previous / next. Preview it in place, open it full screen, download the `.html` or copy it.
+- Long AI answers are continued automatically when they hit the output limit; the analysis runs in two parts (PRD & audit, then matrices).
+- `use_figma` returns at most 48 KB and accepts at most 50,000 characters of code per call: screen images arrive in slices, generated code is compacted, and Handoff / Comparison are built over several calls.
 
 ---
 
@@ -93,7 +93,7 @@ src/
   step1.jsx          Raw ADO ingestion (Markdown editor, stakeholders)
   steps23.jsx        Structured PRD & audit, suggestions, matrices, review board
   step4.jsx          Prompt compiler, the Figma panel and the prototype panel
-  prototype.js       Navigable HTML prototype (AI prompt and no-AI storyboard)
+  prototype-figma.js Navigable prototype built from the generated Figma page
   drawer.jsx         Configuration: AI, PRD template, design-system slots, Figma
   ai.js              Provider-agnostic AI layer
   engine.js          Analysis prompt, local rules engine, exports

@@ -44,7 +44,7 @@ WORK ITEM (${pipe.ado?.id || "no id"} · PO ${pipe.ado?.po || "?"} · stakeholde
 """
 ${mdForPrompt(pipe.ado?.raw).slice(0, 40000)}
 """
-${pipe.ado?.designerNotes ? `\nDESIGNER COMMENTS (take into account):\n${pipe.ado.designerNotes}\n` : ""}
+${pipe.ado?.designerNotes ? `\nDESIGNER COMMENTS (take into account):\n${mdForPrompt(pipe.ado.designerNotes)}\n` : ""}
 SECTIONS TO PROPOSE (id · title · what the template asks · current content):
 ${gaps.map((s) => `${s.id} · ${s.title} · ${s.guidance} · current: ${res.prd[s.id]?.content ? String(res.prd[s.id].content).slice(0, 300) : "(empty)"}`).join("\n")}
 

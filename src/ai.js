@@ -42,6 +42,13 @@ async function post(url, headers, body, signal) {
   try { return JSON.parse(txt); } catch { throw err("http", "The AI service returned something that isn't JSON."); }
 }
 
+/* Continuations sometimes repeat the last few characters or wrap the rest in a code fence. */
+function joinPart(acc, next) {
+  let t = String(next || "").replace(/^\s*```[a-z]*\s*\n?/i, "").replace(/\n?```\s*$/, "");
+  for (let k = Math.min(200, acc.length, t.length); k >= 12; k--) if (acc.endsWith(t.slice(0, k))) return t.slice(k);
+  return t;
+}
+
 /* Returns { ask(prompt, opts) → Promise<string>, provider, label, imageLimit() } */
 export function makeAI({ aiCfg, caps, manualBridge }) {
   const provider = resolveProvider(aiCfg, caps);
@@ -51,37 +58,58 @@ export function makeAI({ aiCfg, caps, manualBridge }) {
     if (provider === "manual") return 0;
     return 5;
   };
-  async function ask(prompt, { images = [], onText, signal, tier = "complex", title } = {}) {
+  /* One model call. msgs is the conversation (user / assistant turns), images go with the first user turn.
+     Returns { text, truncated }: truncated means the answer hit the output limit and can be continued. */
+  async function once(msgs, { images = [], onText, signal, tier }) {
     if (provider === "claude") {
       if (!caps.sample) throw err("unavailable", "Claude isn't available in this view. Choose another AI provider in Configuration.");
       try {
-        const { text } = await caps.sample(prompt, { modelTier: tier, signal, ...(images.length ? { images } : {}), onText: onText ? ({ text }) => onText(text) : undefined });
-        return text;
-      } catch (e) { throw err(e?.code || "error", e?.code === "not_granted" ? "Claude access was declined for this page." : e?.message || "Claude call failed."); }
+        const input = msgs.length === 1 ? msgs[0].content : msgs;
+        const r = await caps.sample(input, { modelTier: tier, signal, ...(images.length ? { images } : {}), onText: onText ? ({ text }) => onText(text) : undefined });
+        return { text: r?.text || "", truncated: !!r?.truncated };
+      } catch (e) {
+        if (e?.text && !["not_granted", "rate_limited", "cancelled", "aborted"].includes(e?.code)) return { text: e.text, truncated: true };
+        throw err(e?.code || "error", e?.code === "not_granted" ? "Claude access was declined for this page." : e?.message || "Claude call failed.");
+      }
     }
-    if (provider === "manual") return manualBridge({ prompt, imageCount: images.length, title });
     const key = getKey(provider);
     if (!key && provider !== "openai") throw err("auth", `Add your ${label} key in Configuration › AI provider.`);
     onText?.("Waiting for " + label + "…");
     if (provider === "openai") {
       const c = aiCfg.openai || {};
-      const content = images.length ? [{ type: "text", text: prompt }, ...(await Promise.all(images.map(async (b) => ({ type: "image_url", image_url: { url: await blobToDataUrl(b) } }))))] : prompt;
-      const j = await post(`${(c.baseUrl || "https://api.openai.com/v1").replace(/\/$/, "")}/chat/completions`, key ? { authorization: `Bearer ${key}` } : {}, { model: need(c.model, "OpenAI-compatible"), messages: [{ role: "user", content }] }, signal);
-      return j.choices?.[0]?.message?.content || "";
+      const first = images.length ? [{ type: "text", text: msgs[0].content }, ...(await Promise.all(images.map(async (b) => ({ type: "image_url", image_url: { url: await blobToDataUrl(b) } }))))] : msgs[0].content;
+      const j = await post(`${(c.baseUrl || "https://api.openai.com/v1").replace(/\/$/, "")}/chat/completions`, key ? { authorization: `Bearer ${key}` } : {}, { model: need(c.model, "OpenAI-compatible"), messages: msgs.map((m, i) => ({ role: m.role, content: i === 0 ? first : m.content })) }, signal);
+      return { text: j.choices?.[0]?.message?.content || "", truncated: j.choices?.[0]?.finish_reason === "length" };
     }
     if (provider === "anthropic") {
       const c = aiCfg.anthropic || {};
-      const content = [...(await Promise.all(images.map(async (b) => { const d = await blobToDataUrl(b); return { type: "image", source: { type: "base64", media_type: d.slice(5, d.indexOf(";")), data: d.split(",")[1] } }; }))), { type: "text", text: prompt }];
-      const j = await post("https://api.anthropic.com/v1/messages", { "x-api-key": key, "anthropic-version": "2023-06-01", "anthropic-dangerous-direct-browser-access": "true" }, { model: c.model || "claude-sonnet-5-5", max_tokens: 16000, messages: [{ role: "user", content }] }, signal);
-      return (j.content || []).filter((b) => b.type === "text").map((b) => b.text).join("");
+      const first = [...(await Promise.all(images.map(async (b) => { const d = await blobToDataUrl(b); return { type: "image", source: { type: "base64", media_type: d.slice(5, d.indexOf(";")), data: d.split(",")[1] } }; }))), { type: "text", text: msgs[0].content }];
+      const j = await post("https://api.anthropic.com/v1/messages", { "x-api-key": key, "anthropic-version": "2023-06-01", "anthropic-dangerous-direct-browser-access": "true" }, { model: c.model || "claude-sonnet-5-5", max_tokens: 16000, messages: msgs.map((m, i) => ({ role: m.role, content: i === 0 ? first : m.content })) }, signal);
+      return { text: (j.content || []).filter((b) => b.type === "text").map((b) => b.text).join(""), truncated: j.stop_reason === "max_tokens" };
     }
     if (provider === "gemini") {
       const c = aiCfg.gemini || {};
-      const parts = [{ text: prompt }, ...(await Promise.all(images.map(async (b) => { const d = await blobToDataUrl(b); return { inline_data: { mime_type: d.slice(5, d.indexOf(";")), data: d.split(",")[1] } }; })))];
-      const j = await post(`https://generativelanguage.googleapis.com/v1beta/models/${encodeURIComponent(need(c.model, "Gemini"))}:generateContent?key=${encodeURIComponent(key)}`, {}, { contents: [{ role: "user", parts }] }, signal);
-      return (j.candidates?.[0]?.content?.parts || []).map((p) => p.text || "").join("");
+      const firstParts = [{ text: msgs[0].content }, ...(await Promise.all(images.map(async (b) => { const d = await blobToDataUrl(b); return { inline_data: { mime_type: d.slice(5, d.indexOf(";")), data: d.split(",")[1] } }; })))];
+      const j = await post(`https://generativelanguage.googleapis.com/v1beta/models/${encodeURIComponent(need(c.model, "Gemini"))}:generateContent?key=${encodeURIComponent(key)}`, {}, { contents: msgs.map((m, i) => ({ role: m.role === "assistant" ? "model" : "user", parts: i === 0 ? firstParts : [{ text: m.content }] })) }, signal);
+      return { text: (j.candidates?.[0]?.content?.parts || []).map((p) => p.text || "").join(""), truncated: j.candidates?.[0]?.finishReason === "MAX_TOKENS" };
     }
     throw err("unavailable", "Unknown AI provider.");
+  }
+  /* Long answers (a whole PRD, an HTML prototype) can hit the model's output limit. When that happens the
+     answer is continued from where it stopped, up to `maxParts` times, and the parts are joined. */
+  async function ask(prompt, { images = [], onText, signal, tier = "complex", title, maxParts = 6 } = {}) {
+    if (provider === "manual") return manualBridge({ prompt, imageCount: images.length, title });
+    let acc = "";
+    let msgs = [{ role: "user", content: prompt }];
+    for (let part = 1; part <= maxParts; part++) {
+      const base = acc;
+      const r = await once(msgs, { images: part === 1 ? images : [], signal, tier, onText: onText ? (t) => onText(base + t) : undefined });
+      acc += part === 1 ? r.text : joinPart(acc, r.text);
+      if (!r.truncated) return acc;
+      onText?.(acc);
+      msgs = [{ role: "user", content: prompt }, { role: "assistant", content: acc }, { role: "user", content: "Your answer was cut off by the output limit. Continue EXACTLY from the last character above: no repetition, no preamble, no code fences, no explanation. Just the remaining text." }];
+    }
+    throw err("too_long", `The answer was still unfinished after ${maxParts} parts. Try again, or shorten the input.`);
   }
   return { ask, provider, label, imageLimit };
 }

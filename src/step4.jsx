@@ -1,6 +1,6 @@
 import React, { useMemo, useState, useSyncExternalStore } from "react";
 import { Figma, RefreshCw, Wand2, AlertTriangle, CheckCircle2, XCircle, Circle, Loader2, ExternalLink, Code2, Copy, Download, Square, MonitorPlay, Maximize2, Sparkles, LayoutTemplate } from "lucide-react";
-import { protoScreens } from "./prototype.js";
+import { figmaReady, singleHtml, prototypeZip } from "./prototype-figma.js";
 import { Btn, Modal, Field, inputCls, copyText, fmtDate } from "./ui.jsx";
 import { validationMD, driftMD, validationCSV, driftCSV, prdMD, reviewNotesMD } from "./engine.js";
 import { parseFigmaUrl, runInFigma, figmaErrorText, pagesToGroups, extractPages, screenList } from "./figma.js";
@@ -9,6 +9,7 @@ import { draftPageName, draftIdOf, childPages } from "./figma-build.js";
 import { activeDS, RULES, allNodes } from "./config.js";
 import { jobStore } from "./jobs.js";
 import { saveFile } from "./drawer.jsx";
+import { mdForPrompt } from "./mdeditor.jsx";
 
 export const AGENTS = {
   "Figma agent": "Build the screens as Figma frames. Use auto layout, library components and variables only (no detached styles). Name every frame with its journey node and screen name, e.g. “J1.2.1.1 – Store list”. Place frames left to right in journey order; place the Review notes board, the Validation Matrix and the Drift Matrix to the right of the last frame.",
@@ -28,7 +29,7 @@ export function compile(cfg, pipe, res, inc, agent) {
   if (inc.figma) out.push(`## 1. Figma target, source of truth and sitemap\n- Target file / branch: ${pipe.figmaUrl || "—"}\n- Source of truth for precedents: ${cfg.sotUrl || "—"}. Before designing a pattern, check the SOT for an existing screen that solves it and reuse it.\n- Journey node (Figma page): ${node}\n- Screens to build (journey node → ACs covered):\n${screens.map((s) => `- ${s.id}: ${s.acs.split("; ").map((a) => a.split(" ")[0]).join(", ")}`).join("\n") || `- ${nodeId}.1 …`}\n- Every frame, layer group and note references its J-node so the sitemap stays organic.`);
   if (inc.ds) out.push(`## 2. Design system rules · ${ds.name} (${RULES[ds.rule]?.label})\n${RULES[ds.rule]?.text}${ds.fallback ? `\n(This slot has no package yet: the files of “${ds.fallback}” below are the reference.)` : ""}\nNever invent color values or spacing outside the design system's scale.\n\n${ds.files.map((f) => `### ${f.path}\n${f.content.trim()}`).join("\n\n")}`);
   if (inc.prd) out.push(`## 3. Structured PRD (${cfg.template.name})\n${prdMD(cfg.template.sections, res.prd, ado).replace(/^# .*\n/, "")}`);
-  if (ado.designerNotes) out.push(`## Designer comments\nTake these into account in every screen and decision:\n${ado.designerNotes}`);
+  if (ado.designerNotes?.trim()) out.push(`## Designer comments\nTake these into account in every screen and decision:\n${mdForPrompt(ado.designerNotes)}`);
   if (inc.stories) out.push(`## 4. User stories and readiness\nProblem understanding (${res.ux.verdict}): ${res.ux.problem}\n\n${res.stories.map((s) => `- ${s.id} [${s.rating}] ${s.text}\n  Critique: ${s.critique}`).join("\n")}\n\nGaps to design around or flag:\n${res.ux.gaps.map((g) => `- [${g.severity}] ${g.category} – ${g.title}: ${g.detail} PO question: ${g.ask}${g.answer ? ` Proposed answer (unconfirmed): ${g.answer}` : ""}`).join("\n")}`);
   if (inc.validation) out.push(`## 5. Acceptance Criteria Validation Matrix\nPlace to the right of the Figma frames. Status values: Designed · Documented / Dev Note Only - No Comp Needed · Blocked.\n\n${validationMD(res.validation)}`);
   if (inc.drift) out.push(`## 6. System & Regional Drift Matrix\nPlace below the Validation Matrix.\n\n${driftMD(res.drift, res.driftColumns)}`);
@@ -168,57 +169,74 @@ function FigmaBuild({ cfg, pipe, setPipe, res, mcp, ai, notify, onSitemap, start
   );
 }
 
-function PrototypePanel({ pipe, res, ai, proto, loadProto, startPrototype, notify, downloads }) {
+function PrototypePanel({ pipe, ai, mcp, proto, startPrototype, notify, downloads }) {
   useSyncExternalStore(jobStore.subscribe, jobStore.snapshot);
   const job = jobStore.forPipeline(pipe.id, "prototype");
+  const figmaJob = jobStore.forPipeline(pipe.id, "figma");
   const running = job?.status === "running";
-  const [mode, setMode] = useState("ai");
+  const building = figmaJob?.status === "running";
+  const ready = figmaReady(pipe);
   const frame = React.useRef(null);
-  React.useEffect(() => { loadProto(pipe.id); }, [pipe.id]);
-  const screens = protoScreens(pipe, res, screenList);
+  const [busy, setBusy] = useState("");
+  const [quality, setQuality] = useState("standard");
+  const html = useMemo(() => (proto?.screens ? singleHtml(proto) : ""), [proto]);
   const slug = (pipe.ado.id || "journey").replace(/[^\w-]+/g, "-");
   const full = () => { try { frame.current?.requestFullscreen?.(); } catch {} };
+  const zip = async () => { setBusy("zip"); try { await saveFile(downloads, `${slug}-prototype.zip`, await prototypeZip(proto), notify); } catch (e) { notify(e.message || "Couldn't build the zip."); } finally { setBusy(""); } };
+  const live = proto?.links?.length || 0;
   return (
     <section aria-label="Navigable HTML prototype" className="rounded-lg border border-line bg-surface">
       <div className="flex flex-wrap items-start justify-between gap-4 border-b border-line p-4">
         <div className="flex min-w-0 items-start gap-3">
           <span className="flex h-10 w-10 shrink-0 items-center justify-center rounded-md bg-accent text-accent-fg"><MonitorPlay size={18} aria-hidden="true" /></span>
           <div className="min-w-0">
-            <h3 className="text-sm font-semibold">Navigable HTML prototype</h3>
-            <p className="max-w-[80ch] text-sm text-muted-strong">A clickable version of the journey in one HTML file, for presentations and user tests. It covers {screens.length} screen{screens.length === 1 ? "" : "s"} {pipe.figmaBuild?.plan?.length ? "planned for the Figma page" : "from the designed journey nodes"}, with the design-system colors and the designer comments.</p>
+            <h3 className="text-sm font-semibold">Navigable prototype from Figma</h3>
+            <p className="max-w-[80ch] text-sm text-muted-strong">Uses the screens generated in Figma as the reference: each screen is exported, its real buttons, tabs, links and fields become clickable, and {ai.label} wires where each one goes. You get an HTML file or a .zip that runs offline, for presentations and user tests.</p>
           </div>
         </div>
         <div className="flex flex-wrap items-center gap-2">
-          <div role="radiogroup" aria-label="Prototype type" className="flex rounded-md bg-surface-2 p-1">
-            {[["ai", `Interactive · ${ai.label}`, Sparkles], ["storyboard", "Quick storyboard · no AI", LayoutTemplate]].map(([k, l, I]) => (
-              <button key={k} role="radio" aria-checked={mode === k} onClick={() => setMode(k)} className={`flex items-center gap-1 rounded px-2 py-1 text-xs ${mode === k ? "bg-surface font-semibold text-fg shadow-sm" : "text-muted hover:text-fg"}`}><I size={13} aria-hidden="true" />{l}</button>
-            ))}
-          </div>
-          <Btn variant="primary" icon={running ? Loader2 : MonitorPlay} disabled={running || !screens.length} onClick={() => startPrototype(pipe.id, mode)}>{running ? "Writing prototype…" : proto?.html ? "Generate again" : "Generate prototype"}</Btn>
+        <div role="radiogroup" aria-label="Image quality" className="flex rounded-md bg-surface-2 p-1">
+          {[["standard", "Standard · faster"], ["sharp", "Sharp · slower"]].map(([k, l]) => (
+            <button key={k} role="radio" aria-checked={quality === k} onClick={() => setQuality(k)} className={`rounded px-2 py-1 text-xs ${quality === k ? "bg-surface font-semibold text-fg shadow-sm" : "text-muted hover:text-fg"}`}>{l}</button>
+          ))}
+        </div>
+        <Btn variant="primary" icon={running ? Loader2 : MonitorPlay} disabled={running || !ready || building} onClick={() => startPrototype(pipe.id, quality)}>{running ? "Building prototype…" : proto?.screens ? "Build again from Figma" : "Build prototype from Figma"}</Btn>
         </div>
       </div>
       <div className="flex flex-col gap-3 p-4">
-        {!screens.length && <p className="text-sm text-warn-fg">No screens yet: mark at least one acceptance criterion as Designed in step 3, or plan the Figma page first.</p>}
-        {running && <p role="status" className="flex items-center gap-2 text-sm"><Loader2 size={14} className="animate-spin text-accent" />{job.steps?.[0]?.note || "Writing…"} · runs in the background, you can keep working.</p>}
+        {!ready && <p className="flex items-center gap-2 rounded-md bg-warn-bg px-3 py-2 text-sm text-warn-fg"><AlertTriangle size={14} aria-hidden="true" />Generate the design in Figma first (panel above). The prototype is built from that page{building ? "; it's being generated now" : ""}.</p>}
+        {ready && building && <p className="text-sm text-muted">Wait for the Figma build to finish; the prototype uses its screens.</p>}
+        {running && (
+          <ol className="flex flex-col gap-1.5 text-sm">
+            {job.steps.map((st, k) => (
+              <li key={k} className="flex items-center gap-2">
+                {st.status === "ok" ? <CheckCircle2 size={14} className="text-ok-fg" /> : st.status === "run" ? <Loader2 size={14} className="animate-spin text-accent" /> : <Circle size={14} className="text-muted" />}
+                <span>{st.label}</span>{st.note && <span className="text-xs text-muted">· {st.note}</span>}
+              </li>
+            ))}
+            <li className="text-xs text-muted">Runs in the background; you can keep working.</li>
+          </ol>
+        )}
         {job?.status === "error" && <p role="alert" className="rounded-md bg-bad-bg px-3 py-2 text-sm text-bad-fg">{job.error}</p>}
-        {proto?.html ? (<>
+        {proto?.screens && !running && (<>
           <div className="flex flex-wrap items-center justify-between gap-2">
-            <p className="text-xs text-muted">{proto.mode === "storyboard" ? "Quick storyboard" : `Interactive · ${proto.by || "AI"}`} · {proto.screens} screens · {Math.round(proto.html.length / 1024)} KB · {fmtDate(proto.at)}. Keys inside: J journey list, P present mode, ← → previous / next.</p>
+            <p className="text-xs text-muted">{proto.screens.length} screens · {live} interactions wired by {proto.by} · from “{proto.figmaPage}” · {fmtDate(proto.at)}. Inside: ← → screens · H hotspots · J journey · P present.</p>
             <div className="flex flex-wrap gap-1.5">
               <Btn size="sm" icon={Maximize2} onClick={full}>Full screen</Btn>
-              <Btn size="sm" icon={Download} onClick={() => saveFile(downloads, `${slug}-prototype.html`, proto.html, notify)}>Download .html</Btn>
-              <Btn size="sm" icon={Copy} onClick={() => copyText(proto.html, notify)}>Copy HTML</Btn>
+              <Btn size="sm" variant="primary" icon={busy === "zip" ? Loader2 : Download} disabled={!!busy} onClick={zip}>Download .zip</Btn>
+              <Btn size="sm" icon={Download} onClick={() => saveFile(downloads, `${slug}-prototype.html`, html, notify)}>Download single .html</Btn>
             </div>
           </div>
-          <iframe ref={frame} title="Prototype preview" srcDoc={proto.html} sandbox="allow-scripts allow-forms allow-modals" className="h-[70vh] w-full rounded-md border border-line bg-white" />
-          <p className="text-xs text-muted">To test with users or present, download the file and open it in any browser; it works offline. You can also publish it as a Claude artifact to share a link.</p>
-        </>) : !running && screens.length > 0 && <p className="text-sm text-muted">Interactive: the AI writes real interactions (tabs, filters, dialogs, toasts, empty and error states) and links every screen. Quick storyboard: an instant click-through of the screens with captions, built without AI.</p>}
+          <iframe ref={frame} title="Prototype preview" srcDoc={html} sandbox="allow-scripts" className="h-[75vh] w-full rounded-md border border-line bg-[#1d1f23]" />
+          <p className="text-xs text-muted">The .zip has index.html, one image per screen and flow.json (every clickable element and link). The single .html embeds the images, so it's larger but is one file to share. This prototype is kept while this page is open; build it again after changing the Figma page.</p>
+        </>)}
+        {!proto?.screens && !running && ready && !building && <p className="text-sm text-muted">Takes a few minutes: about {pipe.figmaBuild?.plan?.length || "a few"} screens to export (Figma sends each image in slices), then one short AI call to wire them. Standard images are 1024 px wide; Sharp keeps up to 1440 px and takes about 50% longer.</p>}
       </div>
     </section>
   );
 }
 
-export function Step4({ cfg, pipe, setPipe, res, notify, downloads, mcp, ai, onSitemap, startBuild, guard, proto, loadProto, startPrototype }) {
+export function Step4({ cfg, pipe, setPipe, res, notify, downloads, mcp, ai, onSitemap, startBuild, guard, proto, startPrototype }) {
   const [inc, setInc] = useState({ figma: true, ds: true, prd: true, stories: true, validation: true, drift: true, board: true });
   const [agent, setAgent] = useState("Figma agent");
   const [fallback, setFallback] = useState(null);
@@ -237,7 +255,7 @@ export function Step4({ cfg, pipe, setPipe, res, notify, downloads, mcp, ai, onS
   return (
     <div className="flex flex-col gap-6">
       <FigmaBuild cfg={cfg} pipe={pipe} setPipe={setPipe} res={res} mcp={mcp} ai={ai} notify={notify} onSitemap={onSitemap} startBuild={startBuild} guard={guard} />
-      <PrototypePanel pipe={pipe} res={res} ai={ai} proto={proto} loadProto={loadProto} startPrototype={startPrototype} notify={notify} downloads={downloads} />
+      <PrototypePanel pipe={pipe} ai={ai} mcp={mcp} proto={proto} startPrototype={startPrototype} notify={notify} downloads={downloads} />
       <div className="grid gap-6 lg:grid-cols-[18rem_1fr]">
         <aside className="flex min-w-0 flex-col gap-4">
           <div className="rounded-lg border border-line bg-surface p-4">

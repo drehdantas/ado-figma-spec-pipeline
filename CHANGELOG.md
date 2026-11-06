@@ -1,5 +1,21 @@
 # Changelog
 
+## 1.2.0 · 2026-11-06
+
+### Added
+- Per-pipeline context: Figma target, source of truth, sitemap and node belong to each pipeline. PRD template and design system are shared only by pipelines with the same product name, which are also the only references for suggestions. Older single-workspace settings migrate automatically.
+- Designer comments are a Markdown editor with images.
+- Navigable prototype built from the generated Figma page: exported screens, real elements as hotspots, AI-wired navigation; download as `.zip` or single `.html`.
+
+### Fixed
+- Empty validation and drift matrices on long work items: the analysis now runs in two parts, step 3 can rebuild the matrices, and local rules fill them if the AI fails.
+- AI answers cut off by the output limit are continued automatically.
+- Figma builds now detect screens and components in any file (no naming convention needed) and clone the file's own screen shell, so designs use the file's design system.
+- Figma connector limits: images exported in slices (48 KB per response) and code compacted and split (50,000 characters per call).
+
+### Removed
+- The AI-written and storyboard HTML prototypes, replaced by the Figma-based prototype.
+
 ## 1.1.0 · 2026-11-06
 
 ### Added

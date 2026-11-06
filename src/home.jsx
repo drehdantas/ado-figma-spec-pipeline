@@ -2,6 +2,7 @@ import React, { useState, useSyncExternalStore } from "react";
 import { Plus, Search, FolderOpen, CopyPlus, Trash2, Loader2 } from "lucide-react";
 import { Badge, Btn, Modal, inputCls, fmtDate } from "./ui.jsx";
 import { jobStore, isRunning } from "./jobs.js";
+import { pipeContext } from "./config.js";
 
 /* ---------------- Home: history of spec pipelines ---------------- */
 const statusOf = (p) => {
@@ -10,12 +11,12 @@ const statusOf = (p) => {
   if (p.res) return [p.step >= 3 ? "Matrices ready" : "Analyzed", "ok"];
   return [p.ado?.raw?.trim() ? "Draft" : "Empty", "neutral"];
 };
-export function Home({ pipelines, loading, onOpen, onNew, onDuplicate, onDelete, storeMode }) {
+export function Home({ cfg, pipelines, loading, onOpen, onNew, onDuplicate, onDelete, storeMode }) {
   useSyncExternalStore(jobStore.subscribe, jobStore.snapshot);
   const [q, setQ] = useState("");
   const [del, setDel] = useState(null);
   const list = Object.values(pipelines).sort((a, b) => String(b.updatedAt).localeCompare(String(a.updatedAt)))
-    .filter((p) => !q || [p.ado?.id, p.ado?.title, p.ado?.po, p.journeyNode].join(" ").toLowerCase().includes(q.toLowerCase()));
+    .filter((p) => !q || [p.ado?.id, p.ado?.title, p.ado?.po, p.journeyNode, pipeContext(p, cfg).productName].join(" ").toLowerCase().includes(q.toLowerCase()));
   return (
     <main className="mx-auto flex max-w-7xl flex-col gap-5 px-gutter pb-16 pt-6">
       <div className="flex flex-wrap items-end justify-between gap-3">
@@ -24,7 +25,7 @@ export function Home({ pipelines, loading, onOpen, onNew, onDuplicate, onDelete,
           <p className="text-sm text-muted">Every ADO you've turned into a PRD, matrices and a Figma design. Open one to continue where you left off.</p>
         </div>
         <div className="flex flex-wrap items-center gap-2">
-          <label className="relative"><span className="sr-only">Search pipelines</span><Search size={14} className="pointer-events-none absolute left-2.5 top-2.5 text-muted" /><input id="search" className={`${inputCls} w-64 pl-8`} placeholder="Search ADO, title, PO, node" value={q} onChange={(e) => setQ(e.target.value)} /></label>
+          <label className="relative"><span className="sr-only">Search pipelines</span><Search size={14} className="pointer-events-none absolute left-2.5 top-2.5 text-muted" /><input id="search" className={`${inputCls} w-64 pl-8`} placeholder="Search ADO, title, product, PO, node" value={q} onChange={(e) => setQ(e.target.value)} /></label>
           <Btn variant="primary" icon={Plus} onClick={onNew}>New spec pipeline</Btn>
         </div>
       </div>
@@ -54,7 +55,7 @@ export function Home({ pipelines, loading, onOpen, onNew, onDuplicate, onDelete,
                   <tr key={p.id} className="cursor-pointer align-top hover:bg-surface-2/60" onClick={() => onOpen(p.id)}>
                     <td className="max-w-[22rem] px-4 py-3">
                       <button className="text-left font-semibold hover:text-accent hover:underline" onClick={(e) => { e.stopPropagation(); onOpen(p.id); }}>{p.ado?.title || "Untitled ADO"}</button>
-                      <p className="text-xs text-muted">{[p.ado?.id, p.ado?.po && `PO ${p.ado.po}`].filter(Boolean).join(" · ") || "No ADO details yet"}{p.example ? " · Example" : ""}</p>
+                      <p className="text-xs text-muted">{[pipeContext(p, cfg).productName.trim() || "No product", p.ado?.id, p.ado?.po && `PO ${p.ado.po}`].filter(Boolean).join(" · ") || "No ADO details yet"}{p.example ? " · Example" : ""}</p>
                     </td>
                     <td className="max-w-[16rem] truncate px-3 py-3 text-xs" title={p.journeyNode}><span className="font-mono">{p.journeyNode.split(" ")[0]}</span> <span className="text-muted">{p.journeyNode.split(" ").slice(1).join(" ")}</span></td>
                     <td className="px-3 py-3"><Badge tone={tone} icon={isRunning(p.id) ? Loader2 : undefined}>{st}</Badge></td>

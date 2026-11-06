@@ -3,7 +3,7 @@
 import { jobStore } from "./jobs.js";
 import { runInFigma, figmaErrorText, stripFences, parseFigmaUrl } from "./figma.js";
 import { contextForPrompt } from "./figma-context.js";
-import { draftIdOf, createPageCode, screensCode, finalizeMainCode, docsCode, cardTexts, docsData, planPrompt, batchPrompt } from "./figma-build.js";
+import { draftIdOf, createPageCode, screensCode, finalizeMainCode, docsCalls, cardTexts, docsData, planPrompt, batchPrompt, CODE_LIMIT } from "./figma-build.js";
 import { parseJSONLoose } from "./engine.js";
 
 export const BATCH = 3;
@@ -64,8 +64,14 @@ export async function runFigmaBuild({ pipelineId, getPipe, updatePipe, cfg, ai, 
       for (let attempt = 0; attempt < 2; attempt++) {
         set(i, { status: "run", note: attempt ? "Fixing and retrying…" : "Writing…" });
         let body;
-        try { body = stripFences(await ai.ask(batchPrompt(brief, ctxText, part, draftId, lastError), { title: `Screens ${part[0].id}–${part[part.length - 1].id}`, onText: (t) => set(i, { note: t.length > 60 ? `${t.split("\n").length} lines written` : t }) })); jobStore.update(job.id, { lastCode: body }); }
+        const maxChars = Math.max(6000, Math.min(16000, CODE_LIMIT - screensCode(ctx, state.pageId, state.mainId, "").length - 2500));
+        try { body = stripFences(await ai.ask(batchPrompt(brief, ctxText, part, draftId, lastError, maxChars), { title: `Screens ${part[0].id}–${part[part.length - 1].id}`, onText: (t) => set(i, { note: t.length > 60 ? `${t.split("\n").length} lines written` : t }) })); jobStore.update(job.id, { lastCode: body }); }
         catch (e) { throw { step: i, msg: `Couldn't write these screens (${e?.message || e?.code}).` }; }
+        if (screensCode(ctx, state.pageId, state.mainId, body).length > CODE_LIMIT) {
+          lastError = `The code was ${body.length.toLocaleString()} characters; it must stay under ${maxChars.toLocaleString()}. Write shorter code: use small local helper functions and loops, fewer sample rows, shorter texts.`;
+          if (attempt === 1) throw { step: i, msg: "The screen code was too long for Figma twice. Try again: answers vary." };
+          continue;
+        }
         set(i, { note: "Running in Figma…" });
         try {
           const out = await runInFigma(mcp, target.fileKey, screensCode(ctx, state.pageId, state.mainId, body), `Build screens ${part[0].id}–${part[part.length - 1].id}`);
@@ -85,8 +91,14 @@ export async function runFigmaBuild({ pipelineId, getPipe, updatePipe, cfg, ai, 
     i = 2 + nb(state.plan);
     if (!state.docs) {
       set(i, { status: "run", note: "Running in Figma…" });
-      try { await runInFigma(mcp, target.fileKey, docsCode(ctx, state.pageId, state.mainId, docsData(pageName, pipe0.ado, res, ctx, state.plan, cfg)), `Build Handoff and Comparison for ${pageName}`); }
-      catch (e) { throw { step: i, msg: say(e) }; }
+      const calls = docsCalls(ctx, state.pageId, state.mainId, docsData(pageName, pipe0.ado, res, ctx, state.plan, cfg));
+      for (let k = state.docsPart || 0; k < calls.length; k++) {
+        stopped(job);
+        set(i, { status: "run", note: `Part ${k + 1} of ${calls.length} · running in Figma…` });
+        try { await runInFigma(mcp, target.fileKey, calls[k], `Build Handoff and Comparison for ${pageName} (part ${k + 1} of ${calls.length})`); }
+        catch (e) { throw { step: i, msg: say(e) }; }
+        save({ docsPart: k + 1 });
+      }
       save({ docs: true });
       set(i, { status: "ok", note: "Placed" });
     }

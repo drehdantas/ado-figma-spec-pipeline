@@ -10,23 +10,33 @@ export const RULES = {
 export const sid = () => "s" + Date.now().toString(36) + Math.random().toString(36).slice(2, 5);
 const NOW = () => new Date().toISOString();
 
-export const DEFAULT_CONFIG = {
-  version: 4,
-  productName: "Your product",
+/* Shared by every pipeline of the same product (same product / platform name). */
+export const DEFAULT_PROFILE = {
   template: { name: PRD_NAME, updatedAt: NOW(), sections: PRD_SECTIONS, raw: PRD_RAW },
   slots: [{ id: "example", name: "Example Design System", rule: "hybrid", packages: [{ id: "p-example", name: "example-design-system (built in)", updatedAt: NOW(), files: SAMPLE_DS_FILES }] }],
   activeSlot: "example",
   styleGuide: MATRIX_STYLE_GUIDE,
-  sotUrl: "",
-  journey: { groups: SAMPLE_JOURNEY, source: "Sample sitemap. Sync it from your Figma file.", syncedAt: null },
+};
+export const PROFILE_KEYS = ["template", "slots", "activeSlot", "styleGuide"];
+/* Own to each pipeline: product name, Figma source of truth and journey sitemap (target file and node already live on the pipeline). */
+export const DEFAULT_JOURNEY = { groups: SAMPLE_JOURNEY, source: "Sample sitemap. Sync it from your Figma file.", syncedAt: null };
+
+/* Workspace: products by name, AI provider. */
+export const DEFAULT_CONFIG = {
+  version: 5,
+  products: {},
+  legacy: null,
   ai: { provider: "auto", openai: { baseUrl: "https://api.openai.com/v1", model: "" }, anthropic: { model: "" }, gemini: { model: "" } },
 };
 export const DEFAULT_NODE = SAMPLE_NODE;
 
-/* Older saved configs: {packages:{hybrid,strict}, dsMode} → slots. Keeps every package the user had. */
-export function migrateConfig(c) {
-  if (!c) return DEFAULT_CONFIG;
-  let out = { ...DEFAULT_CONFIG, ...c };
+export const productKey = (name) => String(name || "").trim().toLowerCase().replace(/\s+/g, " ");
+const pickProfile = (o) => Object.fromEntries(PROFILE_KEYS.map((k) => [k, o[k] ?? DEFAULT_PROFILE[k]]));
+export const cloneProfile = (o) => JSON.parse(JSON.stringify(pickProfile(o || DEFAULT_PROFILE)));
+
+/* Older design-system shape {packages:{hybrid,strict}, dsMode} → slots. Keeps every package the user had. */
+function migrateSlots(c) {
+  const out = { ...c };
   if (!Array.isArray(c.slots)) {
     const slots = [];
     if (c.packages) {
@@ -37,15 +47,45 @@ export function migrateConfig(c) {
         slots.push({ id: k, name: names[k], rule: k, packages: p ? [{ id: "p-" + k, name: p.name, updatedAt: p.updatedAt, files: p.files }] : [] });
       }
     }
-    out.slots = slots.length ? slots : DEFAULT_CONFIG.slots;
+    out.slots = slots.length ? slots : DEFAULT_PROFILE.slots;
     out.activeSlot = c.dsMode && /strict/i.test(c.dsMode) ? "strict" : (out.slots[0] || {}).id;
-    delete out.packages; delete out.dsMode;
   }
   if (!out.slots.some((s) => s.id === out.activeSlot)) out.activeSlot = out.slots[0]?.id;
-  out.ai = { ...DEFAULT_CONFIG.ai, ...(c.ai || {}) };
-  out.version = 4;
   return out;
 }
+
+/* v4 and older kept one global configuration. It becomes the product profile of its product name, and its
+   source of truth and sitemap become the starting values of the pipelines that existed then. */
+export function migrateConfig(c) {
+  if (!c) return DEFAULT_CONFIG;
+  const ai = { ...DEFAULT_CONFIG.ai, ...(c.ai || {}) };
+  if (c.version >= 5 && c.products) {
+    const products = Object.fromEntries(Object.entries(c.products).map(([k, p]) => [k, { ...p, ...migrateSlots(pickProfile(p)) }]));
+    return { ...DEFAULT_CONFIG, ...c, products, ai };
+  }
+  const old = migrateSlots({ ...DEFAULT_PROFILE, ...c });
+  const name = String(c.productName || "").trim();
+  const products = name ? { [productKey(name)]: { name, ...pickProfile(old), updatedAt: NOW() } } : {};
+  return { version: 5, products, ai, legacy: { productName: name, sotUrl: c.sotUrl || "", journey: c.journey || DEFAULT_JOURNEY, profile: name ? null : pickProfile(old) } };
+}
+
+/* A pipeline's own context, falling back to the old global values for pipelines made before v5. */
+export function pipeContext(pipe, cfg) {
+  const lg = (pipe?.ctxV ? null : cfg.legacy) || {};
+  return { productName: pipe?.productName ?? lg.productName ?? "", sotUrl: pipe?.sotUrl ?? lg.sotUrl ?? "", journey: pipe?.journey || lg.journey || DEFAULT_JOURNEY };
+}
+export function profileOf(cfg, pipe) {
+  const k = productKey(pipeContext(pipe, cfg).productName);
+  if (k) return cfg.products?.[k] || null;
+  return pipe?.ownProfile || (!pipe?.ctxV && cfg.legacy?.profile) || null;
+}
+/* The configuration a pipeline works with: its product's profile, its own Figma context, the workspace AI. */
+export function scopedConfig(cfg, pipe) {
+  const pc = pipeContext(pipe, cfg);
+  return { ...cloneless(profileOf(cfg, pipe) || DEFAULT_PROFILE), ai: cfg.ai, productName: pc.productName.trim() || "Untitled product", productNameRaw: pc.productName, productKey: productKey(pc.productName), sotUrl: pc.sotUrl, journey: pc.journey };
+}
+const cloneless = (p) => pickProfile(p);
+export const productNames = (cfg) => Object.values(cfg.products || {}).map((p) => p.name).filter(Boolean).sort((a, b) => a.localeCompare(b));
 
 /* The design system in use: the active slot, falling back to the first slot that has files. */
 export function activeDS(cfg) {

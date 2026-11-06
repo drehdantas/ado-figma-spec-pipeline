@@ -210,7 +210,15 @@ export function localAnalyze(ado, ctx) {
 }
 
 /* ---------- Claude engine ---------- */
-export function buildAnalysisPrompt(ado, ctx) {
+/* Summary of part 1 handed to part 2, so the matrices agree with the stories and gaps. */
+export function priorSummary(res) {
+  const st = (res.stories || []).map((x) => `- ${x.id} [${x.rating}] ${x.text}`).join("\n");
+  const gp = (res.ux?.gaps || []).map((g, i) => `- G${i + 1} [${g.severity}] ${g.title}: ${g.ask}`).join("\n");
+  return `Verdict: ${res.ux?.verdict || "?"}\nStories:\n${st || "—"}\nUX gaps / PO questions:\n${gp || "—"}`;
+}
+/* Two parts keep each answer short enough to arrive complete: long work items used to cut the answer off
+   before the matrices (the last keys), leaving step 3 empty. */
+export function buildAnalysisPrompt(ado, ctx, part = "core") {
   const sections = ctx.sections.map((s) => `${s.id} ${s.title} – ${s.guidance || ""}`).join("\n");
   const ds = ctx.dsFiles.map((f) => `--- ${f.path}\n${f.content}`).join("\n").slice(0, 60000);
   return `You are a senior product designer and product analyst for ${ctx.productName || "an enterprise product"}. Convert a raw Azure DevOps work item into a structured PRD and a design-readiness review.
@@ -250,13 +258,19 @@ RULES
 - Review notes: open questions, recommendations, accessibility concerns. "affects" lists screens and ACs like "J1.2.1.1, J1.2.1.4 · AC-3, AC-5".
 - Plain, short sentences.
 
-Return exactly ONE JSON object and nothing else: no prose, no code fences, no notes before or after it. Keep every string on one line (use \n inside strings). The object must match:
+${part === "matrices" ? `PART 2 OF 2 · MATRICES. The PRD, stories and UX gaps are already written (summary below). Now write ONLY the validation matrix, the drift matrix and the review notes. Cover EVERY acceptance criterion in the work item, one row each, in order; include numbering gaps and duplicates as their own rows.
+ALREADY WRITTEN:
+${ctx.prior || "—"}
+
+Return exactly ONE JSON object and nothing else: no prose, no code fences. Keep every string on one line. Keep cells short (one or two sentences). The object must match:
+{"validation":[{"ac":"AC-01","requirement":"short summary","status":"...","node":"...","questions":"...","recs":"..."}],
+"drift":[{"aspect":"...","primary":"...","variantA":"...","variantB":"...","drift":"...","rec":"..."}],
+"reviewNotes":{"openQuestions":[{"title":"...","body":"...","answer":"","affects":"...","done":false}],"recommendations":[...same shape],"accessibility":[...same shape]}}` : `PART 1 OF 2 · PRD AND AUDIT. Write ONLY the PRD, the stories and the UX review now; the matrices are written in a second step, so do not include them.
+
+Return exactly ONE JSON object and nothing else: no prose, no code fences, no notes before or after it. Keep every string on one line (use \\n inside strings). Keep PRD content concise: facts and what's missing, no repetition. The object must match:
 {"prd":{"<section id>":{"status":"filled|partial|missing","content":"..."}},
 "stories":[{"id":"US-1","text":"...","rating":"Strong|Needs Clarification|Critical Gap","critique":"..."}],
-"ux":{"verdict":"Sufficient|Partially sufficient|Insufficient","problem":"paragraph","gaps":[{"category":"Edge case|Empty state|Error state|Bulk action|Business rule|Permissions|Accessibility|Scope","severity":"Needs Clarification|Critical Gap","title":"...","detail":"...","ask":"question for the PO"}]},
-"validation":[{"ac":"AC-01","requirement":"short summary","status":"...","node":"...","questions":"...","recs":"..."}],
-"drift":[{"aspect":"...","primary":"...","variantA":"...","variantB":"...","drift":"...","rec":"..."}],
-"reviewNotes":{"openQuestions":[{"title":"...","body":"...","answer":"","affects":"...","done":false}],"recommendations":[...same shape],"accessibility":[...same shape]}}`;
+"ux":{"verdict":"Sufficient|Partially sufficient|Insufficient","problem":"paragraph","gaps":[{"category":"Edge case|Empty state|Error state|Bulk action|Business rule|Permissions|Accessibility|Scope","severity":"Needs Clarification|Critical Gap","title":"...","detail":"...","ask":"question for the PO"}]}}`}`;
 }
 
 /* Reads the JSON an AI agent returns, even when it adds prose, code fences, a second block,

@@ -25,8 +25,8 @@ export function imageRefs(md) {
   return out;
 }
 /* Text for prompts and keyword rules: images become numbered placeholders. */
-export function mdForPrompt(md) {
-  let n = 0;
+export function mdForPrompt(md, start = 0) {
+  let n = start;
   return String(md || "").replace(IMG_RE, (_, alt) => `[Image ${++n}${alt ? ": " + alt : ""}]`);
 }
 export async function imageBlobs(md, images, max) {
@@ -53,7 +53,7 @@ async function downscale(file, maxSide = 1400, quality = 0.8) {
 }
 const toDataUrl = (blob) => new Promise((ok, bad) => { const r = new FileReader(); r.onload = () => ok(r.result); r.onerror = bad; r.readAsDataURL(blob); });
 
-export function MarkdownEditor({ id, value, onChange, images, onImages, assets, notify, placeholder }) {
+export function MarkdownEditor({ id, value, onChange, images, onImages, assets, notify, placeholder, height = "h-[28rem]" }) {
   const [mode, setMode] = useState("write");
   const [uploading, setUploading] = useState(0);
   const [drag, setDrag] = useState(false);
@@ -170,10 +170,10 @@ export function MarkdownEditor({ id, value, onChange, images, onImages, assets, 
       <div className={`grid min-h-0 ${mode === "split" ? "md:grid-cols-2" : ""}`}>
         {mode !== "preview" && (
           <textarea id={id} ref={ta} spellCheck={false} value={value} onChange={(e) => onChange(e.target.value)} onPaste={onPaste} placeholder={placeholder}
-            className={`h-[28rem] w-full resize-y border-0 bg-surface p-3 font-mono text-[13px] leading-relaxed text-fg placeholder:text-muted focus:outline-none ${mode === "split" ? "md:border-r md:border-line" : ""}`} />
+            className={`${height} w-full resize-y border-0 bg-surface p-3 font-mono text-[13px] leading-relaxed text-fg placeholder:text-muted focus:outline-none ${mode === "split" ? "md:border-r md:border-line" : ""}`} />
         )}
         {mode !== "write" && (
-          <div className="md-preview h-[28rem] min-w-0 overflow-auto p-4 text-sm" dangerouslySetInnerHTML={{ __html: html || '<p class="md-empty">Nothing to preview yet.</p>' }} />
+          <div className={`md-preview ${height} min-w-0 overflow-auto p-4 text-sm`} dangerouslySetInnerHTML={{ __html: html || '<p class="md-empty">Nothing to preview yet.</p>' }} />
         )}
       </div>
       <div className="flex flex-wrap items-center justify-between gap-2 border-t border-line px-3 py-1.5 text-[11px] text-muted">

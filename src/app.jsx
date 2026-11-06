@@ -2,7 +2,7 @@ import React, { useEffect, useMemo, useRef, useState, useSyncExternalStore } fro
 import { createRoot } from "react-dom/client";
 import { GitCompare, ArrowLeft, ArrowRight, Plus, Loader2, CheckCircle2, XCircle, X, Copy, Figma, ClipboardPaste } from "lucide-react";
 import { Btn, Modal, Toast, Field, copyText } from "./ui.jsx";
-import { localAnalyze, buildAnalysisPrompt, parseJSONLoose, normalize, repairPrompt } from "./engine.js";
+import { localAnalyze, buildAnalysisPrompt, parseJSONLoose, normalize, repairPrompt, priorSummary } from "./engine.js";
 import { Step2, Step3 } from "./steps23.jsx";
 import { Step1 } from "./step1.jsx";
 import { Step4, compile } from "./step4.jsx";
@@ -10,21 +10,20 @@ import { Home } from "./home.jsx";
 import { ContextDrawer, saveFile } from "./drawer.jsx";
 import { openStore } from "./store.js";
 import { buildPdf } from "./pdf.js";
-import { mdForPrompt, imageBlobs } from "./mdeditor.jsx";
-import { DEFAULT_CONFIG, DEFAULT_NODE, migrateConfig, activeDS, dsLabel, RULES } from "./config.js";
+import { mdForPrompt, imageBlobs, imageRefs } from "./mdeditor.jsx";
+import { DEFAULT_CONFIG, DEFAULT_NODE, DEFAULT_JOURNEY, PROFILE_KEYS, migrateConfig, activeDS, dsLabel, RULES, scopedConfig, pipeContext, productKey, cloneProfile, profileOf } from "./config.js";
 import { makeAI } from "./ai.js";
 import { jobStore, isRunning } from "./jobs.js";
 import { runFigmaBuild } from "./figma-runner.js";
-import { protoScreens, protoTokens, prototypePrompt, extractHtml, storyboardHtml } from "./prototype.js";
-import { screenList } from "./figma.js";
+import { runFigmaPrototype } from "./prototype-figma.js";
 import { relatedPipelines, historyForSection, suggestPrompt } from "./suggest.js";
 import { DEMO_ADO, DEMO_ANALYSIS } from "./sample/demo.js";
 
 const EMPTY_ADO = { id: "", link: "", po: "", stakeholders: "", title: "", raw: "", designerNotes: "", images: {} };
 const uid = () => "p" + Date.now().toString(36) + Math.random().toString(36).slice(2, 6);
 const now = () => new Date().toISOString();
-const newPipeline = (over = {}) => ({ ado: EMPTY_ADO, res: null, step: 1, engine: "ai", figmaUrl: "", journeyNode: DEFAULT_NODE, analyzedRaw: "", figmaRuns: [], ...over, id: uid(), createdAt: now(), updatedAt: now() });
-const SEED = { id: "example-store-locator", example: true, createdAt: now(), updatedAt: now(), ado: { ...DEMO_ADO, stakeholders: "Jordan Lee (Engineering lead), Sam Park (Market A operations)" }, res: DEMO_ANALYSIS, step: 2, engine: "ai", figmaUrl: "", journeyNode: DEFAULT_NODE, analyzedRaw: DEMO_ADO.raw, figmaRuns: [] };
+const newPipeline = (over = {}) => ({ ctxV: 1, productName: "", sotUrl: "", journey: DEFAULT_JOURNEY, ownProfile: null, ado: EMPTY_ADO, res: null, step: 1, engine: "ai", figmaUrl: "", journeyNode: DEFAULT_NODE, analyzedRaw: "", figmaRuns: [], ...over, id: uid(), createdAt: now(), updatedAt: now() });
+const SEED = { id: "example-store-locator", example: true, ctxV: 1, productName: "Example product", sotUrl: "", journey: DEFAULT_JOURNEY, createdAt: now(), updatedAt: now(), ado: { ...DEMO_ADO, stakeholders: "Jordan Lee (Engineering lead), Sam Park (Market A operations)" }, res: DEMO_ANALYSIS, step: 2, engine: "ai", figmaUrl: "", journeyNode: DEFAULT_NODE, analyzedRaw: DEMO_ADO.raw, figmaRuns: [] };
 
 const STEPS = [
   { n: 1, label: "Raw ADO ingestion" },
@@ -57,7 +56,7 @@ function Stepper({ step, setStep, hasResult }) {
 /* What the analysis was made from: the ADO text plus the designer comments, so editing either enables converting again. */
 const analysisSig = (ado) => ado.raw + (ado.designerNotes?.trim() ? `\n\n[designer]\n${ado.designerNotes.trim()}` : "");
 
-function PipelineView({ cfg, setCfg, pipe, setPipe, all, caps, ai, notify, guard, startBuild, proto, loadProto, startPrototype }) {
+function PipelineView({ cfg: wcfg, setCfg, pipe, setPipe, all, caps, ai, notify, guard, startBuild, proto, startPrototype }) {
   const [drawer, setDrawer] = useState(() => { try { return localStorage.getItem("adoPipeline.drawer") !== "0"; } catch { return true; } });
   const [busy, setBusy] = useState(false);
   const [progress, setProgress] = useState("");
@@ -66,6 +65,49 @@ function PipelineView({ cfg, setCfg, pipe, setPipe, all, caps, ai, notify, guard
   const [suggestBusy, setSuggestBusy] = useState(false);
   const ctl = useRef(null);
   useEffect(() => { try { localStorage.setItem("adoPipeline.drawer", drawer ? "1" : "0"); } catch {} }, [drawer]);
+  /* Each pipeline has its own context. Product-level parts (PRD template, design system, style guide) are shared
+     only with pipelines of the same product name; Figma target, source of truth and sitemap are always its own. */
+  const cfg = scopedConfig(wcfg, pipe);
+  useEffect(() => {
+    if (pipe.ctxV) return;
+    const pc = pipeContext(pipe, wcfg);
+    setPipe({ ctxV: 1, ...pc, ownProfile: productKey(pc.productName) ? null : cloneProfile(profileOf(wcfg, pipe)) });
+  }, [pipe.id]);
+  const setScoped = (next) => {
+    const pc = pipeContext(pipe, wcfg);
+    const k = productKey(pc.productName);
+    const patch = {};
+    if (next.sotUrl !== cfg.sotUrl) patch.sotUrl = next.sotUrl;
+    if (next.journey !== cfg.journey) patch.journey = next.journey;
+    let w = wcfg;
+    if (next.ai !== cfg.ai) w = { ...w, ai: next.ai };
+    if (PROFILE_KEYS.some((key) => next[key] !== cfg[key])) {
+      const prof = Object.fromEntries(PROFILE_KEYS.map((key) => [key, next[key]]));
+      if (k) w = { ...w, products: { ...w.products, [k]: { ...(w.products?.[k] || {}), name: w.products?.[k]?.name || pc.productName.trim(), ...prof, updatedAt: now() } } };
+      else patch.ownProfile = prof;
+    }
+    if (w !== wcfg) setCfg(w);
+    if (Object.keys(patch).length) setPipe({ ctxV: 1, productName: pc.productName, sotUrl: pc.sotUrl, journey: pc.journey, ...patch });
+  };
+  const sameProduct = useMemo(() => {
+    if (!cfg.productKey) return {};
+    return Object.fromEntries(Object.entries(all).filter(([id, p]) => id !== pipe.id && productKey(pipeContext(p, wcfg).productName) === cfg.productKey));
+  }, [all, cfg.productKey, pipe.id]);
+  const productInfo = { names: Object.values(wcfg.products || {}).map((p) => p.name).filter(Boolean), shared: Object.keys(sameProduct).length, exists: !!wcfg.products?.[cfg.productKey] };
+  /* Renaming the product: an existing name adopts that product's template and design system; a new name starts
+     a new product from what this pipeline uses now; no name keeps a private copy for this pipeline only. */
+  const setProductName = (raw) => {
+    const name = String(raw || "").trim();
+    const pc = pipeContext(pipe, wcfg);
+    if (name === pc.productName.trim()) return;
+    const k = productKey(name);
+    const current = cloneProfile(profileOf(wcfg, pipe));
+    const patch = { ctxV: 1, productName: name, sotUrl: pc.sotUrl, journey: pc.journey, ownProfile: k ? null : current };
+    if (k && !wcfg.products?.[k]) { setCfg({ ...wcfg, products: { ...wcfg.products, [k]: { name, ...current, updatedAt: now() } } }); notify(`New product “${name}”. It starts with this pipeline's PRD template and design system.`); }
+    else if (k) { const n = Object.values(all).filter((p) => p.id !== pipe.id && productKey(pipeContext(p, wcfg).productName) === k).length; notify(`Using the PRD template and design system of “${wcfg.products[k].name}”${n ? ` · shared with ${n} other pipeline${n > 1 ? "s" : ""}` : ""}`); }
+    else notify("No product name: this pipeline keeps its own PRD template and design system.");
+    setPipe(patch);
+  };
   const { ado, res, step } = pipe;
   const engine = pipe.engine === "local" ? "local" : "ai";
   const setRes = (r) => setPipe({ res: r });
@@ -76,30 +118,58 @@ function PipelineView({ cfg, setCfg, pipe, setPipe, all, caps, ai, notify, guard
   const upToDate = !!res && pipe.analyzedRaw === sig && !!ado.raw.trim();
   const g = (label, fn) => guard(pipe.id, label, fn);
 
+  const [mx, setMx] = useState({ busy: false, progress: "" });
+  const adoForPrompt = () => ({ ...ado, raw: mdForPrompt(ado.raw), designerNotes: mdForPrompt(ado.designerNotes || "", imageRefs(ado.raw).length) });
+  const askJSON = async (prompt, opts) => {
+    const text = await ai.ask(prompt, opts);
+    try { return parseJSONLoose(text); }
+    catch { return parseJSONLoose(await ai.ask(repairPrompt(text), { signal: opts.signal, title: "Fix the answer's JSON", tier: "default" })); }
+  };
+  /* Part 2: validation matrix, drift matrix and review notes, asked separately so they always arrive complete.
+     Falls back to the local rules engine so step 3 is never empty. */
+  const buildMatrices = async (base, adoText, signal, onProgress) => {
+    try {
+      const data = await askJSON(buildAnalysisPrompt(adoText, { ...ctx(), prior: priorSummary(base) }, "matrices"), { signal, title: "Build the validation & drift matrices", onText: (t) => onProgress(`Writing the matrices… ${t.length.toLocaleString()} characters`) });
+      const n = normalize({ ...base, ...data }, ctx());
+      if (!n.validation.length) throw new Error("the answer had no matrix rows");
+      return { validation: n.validation, drift: n.drift, driftColumns: n.driftColumns, reviewNotes: n.reviewNotes, matricesBy: ai.label };
+    } catch (e) {
+      if (e?.code === "cancelled") throw e;
+      const loc = localAnalyze(adoText, ctx());
+      return { validation: loc.validation, drift: loc.drift, driftColumns: loc.driftColumns, reviewNotes: loc.reviewNotes, matricesBy: `Local rules: the AI matrices failed (${e?.message || "unknown error"})` };
+    }
+  };
+  const onMatrices = async () => {
+    setMx({ busy: true, progress: "Building the matrices…" });
+    ctl.current = new AbortController();
+    try {
+      const m = await buildMatrices(res, adoForPrompt(), ctl.current.signal, (t) => setMx({ busy: true, progress: t }));
+      setPipe((p) => ({ res: { ...p.res, ...m } }));
+      notify(`Matrices ready · ${m.validation.length} AC rows, ${m.drift.length} drift rows`);
+    } catch (e) { if (e?.code !== "cancelled") notify(e?.message || "Couldn't build the matrices."); }
+    finally { setMx({ busy: false, progress: "" }); }
+  };
+
   const run = () => {
     setErr("");
     if (upToDate) { setPipe({ step: 2 }); return; }
     g("Converting the ADO again", async () => {
       if (ado.raw === DEMO_ADO.raw && !ado.designerNotes?.trim()) { setPipe({ res: DEMO_ANALYSIS, step: 2, analyzedRaw: sig }); return; }
-      const adoText = { ...ado, raw: mdForPrompt(ado.raw) };
+      const adoText = adoForPrompt();
       if (engine === "local") { setPipe({ res: localAnalyze(adoText, ctx()), step: 2, analyzedRaw: sig }); notify("Analyzed with local rules"); return; }
       setBusy(true); setProgress("Thinking…");
       ctl.current = new AbortController();
       try {
         const max = await ai.imageLimit();
-        const imgs = max ? await imageBlobs(ado.raw, ado.images, max) : [];
+        const imgs = max ? await imageBlobs(`${ado.raw}\n\n${ado.designerNotes || ""}`, ado.images, max) : [];
         if (imgs.length) setProgress(`Thinking… (${imgs.length} image${imgs.length > 1 ? "s" : ""} attached)`);
-        const prompt = buildAnalysisPrompt(adoText, ctx()) + (imgs.length ? `\n\nATTACHED IMAGES: ${imgs.length} image(s) from the ADO, in the order of the [Image n] markers above. Read them as part of the work item.` : "");
-        const text = await ai.ask(prompt, { images: imgs, signal: ctl.current.signal, title: "Convert the ADO", onText: (t) => setProgress(t.length > 80 ? `Writing analysis… ${t.length.toLocaleString()} characters` : t) });
-        let data;
-        try { data = parseJSONLoose(text); }
-        catch {
-          setProgress("Tidying the answer…");
-          data = parseJSONLoose(await ai.ask(repairPrompt(text), { signal: ctl.current.signal, title: "Fix the answer's JSON", tier: "default" }));
-        }
+        const prompt = buildAnalysisPrompt(adoText, ctx()) + (imgs.length ? `\n\nATTACHED IMAGES: ${imgs.length} image(s) from the ADO and the designer comments, in the order of the [Image n] markers above. Read them as part of the work item.` : "");
+        const data = await askJSON(prompt, { images: imgs, signal: ctl.current.signal, title: "Convert the ADO · 1 of 2 (PRD & audit)", onText: (t) => setProgress(t.length > 80 ? `1/2 · Writing PRD & audit… ${t.length.toLocaleString()} characters` : t) });
         const parsed = normalize(data, ctx());
         parsed.engine = ai.label;
-        setPipe({ res: parsed, step: 2, analyzedRaw: sig }); notify("Analysis ready");
+        setProgress("2/2 · Building the validation & drift matrices…");
+        const m = await buildMatrices(parsed, adoText, ctl.current.signal, (t) => setProgress(`2/2 · ${t}`));
+        setPipe({ res: { ...parsed, ...m }, step: 2, analyzedRaw: sig }); notify(/^Local/.test(m.matricesBy) ? "Analysis ready · matrices from local rules" : "Analysis ready");
       } catch (e) {
         if (e?.code === "cancelled") setErr("Stopped. Nothing was changed.");
         else if (e?.code === "not_granted") { setErr("AI access was declined, so the local rules engine was used instead."); setPipe({ res: localAnalyze(adoText, ctx()), step: 2, analyzedRaw: sig }); }
@@ -108,7 +178,7 @@ function PipelineView({ cfg, setCfg, pipe, setPipe, all, caps, ai, notify, guard
     });
   };
 
-  const related = useMemo(() => (res ? relatedPipelines(pipe, all) : []), [pipe.id, ado.raw, ado.title, ado.po, ado.stakeholders, !!res, Object.keys(all).length]);
+  const related = useMemo(() => (res ? relatedPipelines(pipe, sameProduct) : []), [pipe.id, ado.raw, ado.title, ado.po, ado.stakeholders, !!res, sameProduct]);
   const history = useMemo(() => {
     if (!res) return {};
     const out = {};
@@ -138,7 +208,7 @@ function PipelineView({ cfg, setCfg, pipe, setPipe, all, caps, ai, notify, guard
 
   return (
     <>
-      <ContextDrawer cfg={cfg} setCfg={setCfg} pipe={pipe} setPipe={setPipe} notify={notify} open={drawer} setOpen={setDrawer} caps={caps} guard={(label, fn) => (/design system|package/i.test(label) ? fn() : g(label, fn))} />
+      <ContextDrawer cfg={cfg} setCfg={setScoped} productInfo={productInfo} setProductName={setProductName} pipe={pipe} setPipe={setPipe} notify={notify} open={drawer} setOpen={setDrawer} caps={caps} guard={(label, fn) => (/design system|package/i.test(label) ? fn() : g(label, fn))} />
       <main className="mx-auto flex max-w-7xl flex-col gap-5 px-gutter pb-16 pt-4">
         <Stepper step={step} setStep={(n) => setPipe({ step: n })} hasResult={!!res} />
         <div>
@@ -150,11 +220,11 @@ function PipelineView({ cfg, setCfg, pipe, setPipe, all, caps, ai, notify, guard
             "Build the design in Figma, or copy one prompt that combines PRD, design rules, Figma context and matrices.",
           ][step - 1]}</p>
         </div>
-        {step === 1 && <Step1 ado={ado} setAdo={(a) => setPipe({ ado: a })} updAdo={(fn) => setPipe((p) => ({ ado: fn(p.ado) }))} engine={engine} setEngine={(e) => setPipe({ engine: e })} aiLabel={ai.label} run={run} busy={busy} progress={progress} stop={() => ctl.current?.abort()} err={err} upToDate={upToDate} assets={caps.assets} notify={notify} />}
+        {step === 1 && <Step1 product={cfg.productNameRaw} productInfo={productInfo} setProductName={setProductName} ado={ado} setAdo={(a) => setPipe({ ado: a })} updAdo={(fn) => setPipe((p) => ({ ado: fn(p.ado) }))} engine={engine} setEngine={(e) => setPipe({ engine: e })} aiLabel={ai.label} run={run} busy={busy} progress={progress} stop={() => ctl.current?.abort()} err={err} upToDate={upToDate} assets={caps.assets} notify={notify} />}
         {step === 2 && res && <Step2 cfg={cfgView} ado={ado} res={res} setRes={setRes} notify={notify} onPdf={onPdf} pdfBusy={pdfBusy} history={history} onSuggest={onSuggest} suggestBusy={suggestBusy} aiLabel={ai.label} />}
-        {step === 3 && res && <Step3 cfg={cfgView} res={res} setRes={setRes} />}
-        {step === 4 && res && <Step4 cfg={cfgView} pipe={pipe} setPipe={setPipe} res={res} notify={notify} downloads={caps.downloads} mcp={caps.mcp} ai={ai} startBuild={startBuild} guard={g} proto={proto} loadProto={loadProto} startPrototype={startPrototype}
-          onSitemap={(groups, n) => setCfg({ ...cfg, journey: { groups, source: `Synced from target file · ${n} pages`, syncedAt: now() } })} />}
+        {step === 3 && res && <Step3 cfg={cfgView} res={res} setRes={setRes} onMatrices={onMatrices} mxBusy={mx.busy} mxProgress={mx.progress} aiLabel={ai.label} />}
+        {step === 4 && res && <Step4 cfg={cfgView} pipe={pipe} setPipe={setPipe} res={res} notify={notify} downloads={caps.downloads} mcp={caps.mcp} ai={ai} startBuild={startBuild} guard={g} proto={proto} startPrototype={startPrototype}
+          onSitemap={(groups, n) => setScoped({ ...cfg, journey: { groups, source: `Synced from target file · ${n} pages`, syncedAt: now() } })} />}
         {res && step > 1 && step < 4 && (
           <div className="flex justify-end gap-2 border-t border-line pt-4">
             <Btn onClick={() => setPipe({ step: step - 1 })}>Back</Btn>
@@ -184,7 +254,7 @@ function JobIndicator({ pipelines, onOpen }) {
           <span key={j.id} className={`inline-flex max-w-[22rem] items-center gap-1.5 rounded-full border py-1 pl-2.5 pr-1 text-xs font-medium ${tone}`}>
             <I size={13} className={j.status === "running" ? "animate-spin" : ""} aria-hidden="true" />
             <button className="truncate pr-1.5 hover:underline" onClick={() => { onOpen(j.pipelineId); if (j.status !== "running") jobStore.update(j.id, { seen: true }); }}>
-              {proto ? (j.status === "running" ? `Writing prototype · ${label}` : j.status === "done" ? `Prototype ready · ${label}` : j.status === "stopped" ? `Prototype stopped · ${label}` : `Prototype failed · ${label}`) : j.status === "running" ? `Building in Figma · ${label} · ${done}/${j.steps.length}${j.stopping ? " · stopping" : ""}` : j.status === "done" ? `Figma page ready · ${label}` : j.status === "stopped" ? `Figma build stopped · ${label}` : `Figma build failed · ${label}`}
+              {proto ? (j.status === "running" ? `Building prototype · ${label} · ${j.steps.find((s) => s.status === "run")?.note || ""}` : j.status === "done" ? `Prototype ready · ${label}` : j.status === "stopped" ? `Prototype stopped · ${label}` : `Prototype failed · ${label}`) : j.status === "running" ? `Building in Figma · ${label} · ${done}/${j.steps.length}${j.stopping ? " · stopping" : ""}` : j.status === "done" ? `Figma page ready · ${label}` : j.status === "stopped" ? `Figma build stopped · ${label}` : `Figma build failed · ${label}`}
             </button>
             {j.status !== "running" && <button aria-label="Dismiss" className="rounded-full p-0.5 hover:bg-surface/60" onClick={() => jobStore.update(j.id, { seen: true })}><X size={12} /></button>}
           </span>
@@ -303,7 +373,8 @@ function App() {
   const startBuild = (pid, { resume, autoDraftName }) => {
     if (isRunning(pid, "figma")) return;
     updatePipe(pid, { autoDraftName });
-    const cfgNow = { ...cfgRef.current, dsName: dsLabel(cfgRef.current) };
+    const sc = scopedConfig(cfgRef.current, latest.current[pid]);
+    const cfgNow = { ...sc, dsName: dsLabel(sc) };
     runFigmaBuild({
       pipelineId: pid, resume, cfg: cfgNow, ai, mcp: caps.mcp, notify,
       getPipe: (id) => latest.current[id], updatePipe,
@@ -311,42 +382,18 @@ function App() {
     });
   };
 
-  /* Navigable HTML prototype: a background job, saved apart from the pipeline because the HTML is large. */
+  /* Navigable prototype built from the generated Figma page. Kept in memory (it holds the screen images). */
   const [protos, setProtos] = useState({});
-  const protosRef = useRef(protos); protosRef.current = protos;
-  const loadProto = async (pid) => {
-    if (protosRef.current[pid] !== undefined) return;
-    let d = null; try { d = await storeRef.current?.getDoc("prototypes", pid); } catch {}
-    setProtos((p) => (p[pid] !== undefined ? p : { ...p, [pid]: d || null }));
-  };
-  const startPrototype = (pid, mode) => {
+  const startPrototype = (pid, quality) => {
     if (isRunning(pid, "prototype")) return;
     const pipe = latest.current[pid]; if (!pipe?.res) return;
-    const cfgNow = { ...cfgRef.current, dsName: dsLabel(cfgRef.current) };
-    const screens = protoScreens(pipe, pipe.res, screenList);
-    const tokens = protoTokens(cfgNow);
-    const notes = pipe.ado.designerNotes?.trim() || "";
-    const job = jobStore.start({ id: uid(), kind: "prototype", pipelineId: pid, title: pipe.ado.id || pipe.ado.title || "Prototype", steps: [{ label: "Write prototype", status: "running", note: mode === "ai" ? `Writing the prototype with ${ai.label}…` : "Building the storyboard…" }] });
-    (async () => {
-      try {
-        let html, by;
-        if (mode === "storyboard") { html = storyboardHtml({ title: pipe.ado.title || pipe.ado.id || "Journey", productName: cfgNow.productName, screens, tokens, res: pipe.res, notes }); by = "No AI"; }
-        else {
-          const brief = compile(cfgNow, pipe, pipe.res, { figma: false, ds: false, prd: true, stories: true, validation: true, drift: false, board: false }, "Prototype agent");
-          const text = await ai.ask(prototypePrompt({ brief, screens, tokens, productName: cfgNow.productName, notes }), { title: "Write the HTML prototype", onText: (t) => jobStore.step(job.id, 0, { note: `Writing the prototype… ${t.length.toLocaleString()} characters` }) });
-          if (jobStore.get(job.id)?.abort) throw Object.assign(new Error("Stopped."), { code: "cancelled" });
-          html = extractHtml(text); by = ai.label;
-        }
-        const doc = { html, mode, at: now(), by, screens: screens.length };
-        setProtos((p) => ({ ...p, [pid]: doc }));
-        jobStore.step(job.id, 0, { status: "ok" }); jobStore.update(job.id, { status: "done" });
-        if (html.length > 240000) notify("Prototype ready. It's too large to keep here, so download it.");
-        else { notify("Prototype ready"); storeRef.current?.saveDoc("prototypes", pid, doc)?.catch?.(() => notify("Prototype ready, but it couldn't be saved. Download it to keep it.")); }
-      } catch (e) {
-        jobStore.step(job.id, 0, { status: "error" });
-        jobStore.update(job.id, { status: e?.code === "cancelled" ? "stopped" : "error", error: e?.code === "cancelled" ? "Stopped." : `Couldn't write the prototype: ${e?.message || "unknown error"}. Try again, or use the quick storyboard.` });
-      }
-    })();
+    const sc = scopedConfig(cfgRef.current, pipe);
+    const cfgNow = { ...sc, dsName: dsLabel(sc) };
+    runFigmaPrototype({
+      pipelineId: pid, getPipe: (id) => latest.current[id], ai, mcp: caps.mcp, notify, quality,
+      compileBrief: () => compile(cfgNow, latest.current[pid], latest.current[pid].res, { figma: false, ds: false, prd: false, stories: true, validation: true, drift: false, board: false }, "Prototype agent"),
+      onDone: (proto) => setProtos((p) => ({ ...p, [pid]: proto })),
+    });
   };
 
   const open = pipelines[openId];
@@ -363,7 +410,7 @@ function App() {
             <JobIndicator pipelines={pipelines} onOpen={openPipe} />
             {openId && (<>
               <Btn size="sm" icon={ArrowLeft} onClick={() => setOpenId(null)}>All pipelines</Btn>
-              <Btn size="sm" icon={Plus} onClick={() => create()}>Clear / New ADO</Btn>
+              <Btn size="sm" icon={Plus} onClick={() => create({ productName: open ? pipeContext(open, cfg).productName : "" })}>Clear / New ADO</Btn>
             </>)}
           </div>
         </div>
@@ -376,10 +423,10 @@ function App() {
             <span className="truncate font-medium">{open.ado.id || open.ado.title || "New ADO"}</span>
             {isRunning(open.id, "figma") && <span className="ml-2 inline-flex items-center gap-1 text-xs text-accent-strong"><Figma size={12} />Figma build running</span>}
           </nav>
-          <PipelineView key={openId} cfg={cfg} setCfg={setCfg} pipe={open} setPipe={(patch) => updatePipe(openId, patch)} all={pipelines} caps={caps} ai={ai} notify={notify} guard={guard} startBuild={startBuild} proto={protos[openId]} loadProto={loadProto} startPrototype={startPrototype} />
+          <PipelineView key={openId} cfg={cfg} setCfg={setCfg} pipe={open} setPipe={(patch) => updatePipe(openId, patch)} all={pipelines} caps={caps} ai={ai} notify={notify} guard={guard} startBuild={startBuild} proto={protos[openId]} startPrototype={startPrototype} />
         </>
       ) : (
-        <Home pipelines={pipelines} loading={loading} storeMode={store?.mode} onOpen={setOpenId} onNew={() => create()}
+        <Home cfg={cfg} pipelines={pipelines} loading={loading} storeMode={store?.mode} onOpen={setOpenId} onNew={() => create()}
           onDuplicate={(p) => create({ ...JSON.parse(JSON.stringify(p)), example: false, ado: { ...p.ado, title: `${p.ado?.title || "Untitled"} (copy)` }, figmaRuns: [], figmaBuild: null })}
           onDelete={remove} />
       )}
