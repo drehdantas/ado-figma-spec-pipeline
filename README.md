@@ -5,7 +5,7 @@ Turn an Azure DevOps work item into everything a product designer needs before a
 1. **Raw ADO ingestion** – paste the feature as Markdown (text, tables and screenshots), with Product Owner and stakeholders, plus **designer comments**: notes the analysis must take into account (context, decisions, research, constraints).
 2. **Structured PRD & audit** – the work item mapped onto *your* PRD template, a readiness critique of every user story, the gaps to raise with the PO, and **suggested answers** for missing sections drawn from your earlier ADOs and from the AI acting as a UX designer. Export a PO review pack (copy or PDF).
 3. **Validation & drift matrices** – an acceptance-criteria validation matrix, a market / design-system drift matrix and a review-notes board, all editable and exportable (Markdown / CSV).
-4. **Prompt compiler & Figma** – one master prompt for any design or coding agent, a **one-click draft page in Figma** that follows how your file already builds screens, handoff and documentation, and a **navigable prototype built from that Figma page** (offline `.zip` or `.html`) for presentations and user tests.
+4. **Prompt compiler & Figma** – one master prompt for any design or coding agent, a **one-click draft page in Figma** that follows how your file already builds screens, handoff and documentation, and a **navigable prototype that mirrors that Figma page** (one offline `.html`) for presentations and user tests.
 
 Every work item is kept in a history list so the team can come back to it.
 
@@ -74,14 +74,26 @@ Requires the Figma MCP server's `use_figma` tool (write access, beta): a Figma p
 
 A Markdown field (text and images) under the raw ADO. The notes go into the analysis, suggestions, the master prompt, the PO review pack PDF, the Figma build and the prototype; images are sent to the AI with the ADO's. Conflicts with the ADO are raised as PO questions. Editing the notes enables converting again.
 
+### Figma references, icons and screen size
+
+- **References** – the Figma panel syncs the target file and the source of truth (SSOT). The SSOT can be a file you only view: it is read with read-only metadata and used as a visual reference. The app learns the screen structure (top bars, side navigation, breadcrumb, title size, modals and side panels) from the existing screens, whatever their naming.
+- **Design system** – the uploaded package is written guidance for the AI (tokens, component rules); colors, text styles and components in Figma come from the file's own variables, styles and library.
+- **Icons** – each button gets an icon that matches its action: from the file's icon components first, then from SVG icons in the design-system package (`.svg` files in the `.zip`). Icons that can't be found are left out.
+- **Components** start from their default state (no hover/pressed variants or sample icons copied from the reference).
+- **Screen height** – desktop screens are 1080 px tall by default and grow only when their content needs more; side navigation and bottom bars follow.
+
 ### Navigable prototype from Figma
 
-Available once the Figma page has been generated. The app exports each generated screen, turns its real buttons, tabs, links and fields into hotspots, and asks the AI (one short call) where each one leads; simple rules take over if no AI is available. Download it as a `.zip` (index.html, one image per screen, `flow.json`) or as one `.html` with the images embedded. Works offline. Keys: `←` `→` screens, `H` hotspots, `J` journey, `P` present.
+While the Figma page is generated, the app records what Figma actually drew on each screen (boxes, texts, fonts, colors, icons as SVG, modals; the header and navigation once) and the clickable elements. The prototype is rebuilt from that record, so it matches the Figma page, with zero extra Figma calls; one short AI call wires buttons, tabs, links and rows into the journey (simple rules if no AI is available). Pages generated earlier can be recorded once with **Record from Figma and build** (read-only). Download one offline `.html`. Keys: `←` `→` screens, `H` hotspots, `J` journey, `P` present.
+
+### Team workspace
+
+Shared pipelines with status (draft → PO review → approved → in design → handoff → done), assignee, activity log and presence; product settings editable by admins; AI settings per person; workspace export and import.
 
 ### Limits handled
 
 - Long AI answers are continued automatically when they hit the output limit; the analysis runs in two parts (PRD & audit, then matrices).
-- `use_figma` returns at most 48 KB and accepts at most 50,000 characters of code per call: screen images arrive in slices, generated code is compacted, and Handoff / Comparison are built over several calls.
+- `use_figma` returns at most 48 KB and accepts at most 50,000 characters of code per call: reads and screen records are size-capped and split over calls, generated code is compacted, and Handoff / Review notes / Comparison are built over several calls.
 
 ---
 
@@ -93,7 +105,10 @@ src/
   step1.jsx          Raw ADO ingestion (Markdown editor, stakeholders)
   steps23.jsx        Structured PRD & audit, suggestions, matrices, review board
   step4.jsx          Prompt compiler, the Figma panel and the prototype panel
-  prototype-figma.js Navigable prototype built from the generated Figma page
+  proto-snap.js      Records the drawn Figma screens and rebuilds them as HTML
+  proto-render.js    Prototype file, navigation wiring, fallback renderer
+  sot-reader.js      Read-only source-of-truth reading (view access)
+  team.js, teamui.jsx, views.jsx  Team workspace: identity, status, activity, dashboard
   drawer.jsx         Configuration: AI, PRD template, design-system slots, Figma
   ai.js              Provider-agnostic AI layer
   engine.js          Analysis prompt, local rules engine, exports

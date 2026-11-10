@@ -48,7 +48,7 @@ function ctxBlob(ctx) {
   for (const [k, v] of Object.entries(ctx.styles || {})) styles[k] = [v.id || null, v.key, v.size || 0, v.n || 0];
   const rv = roleVars(ctx);
   const vars = Object.fromEntries(Object.entries(rv).filter(([, v]) => v).map(([k, v]) => [k, { key: v.key, hex: v.hex }]));
-  return { ex, styles, vars, screen: ctx.screenExemplar, featureCard: ctx.featureCard?.id || null };
+  return { ex, styles, vars, screen: ctx.screenExemplar, featureCard: ctx.featureCard?.id || null, sotModals: (ctx.sot?.modals || []).map((m) => ({ name: m.name, w: m.w })), icons: ctx.iconMap || {} };
 }
 
 /* use_figma accepts at most 50,000 characters of code per call. The helper prelude is sent with every
@@ -81,6 +81,7 @@ const page = await figma.getNodeByIdAsync(${JSON.stringify(pageId)});
 await figma.setCurrentPageAsync(page);
 for (const s of ["Regular", "Medium", "Semi Bold", "Bold"]) await figma.loadFontAsync({ family: "Inter", style: s });
 const CREATED = [];
+const SNAPS = [];
 const WARN = [];
 const hex = (h) => { h = String(h || "#000000").replace("#", ""); return { r: parseInt(h.slice(0, 2), 16) / 255, g: parseInt(h.slice(2, 4), 16) / 255, b: parseInt(h.slice(4, 6), 16) / 255 }; };
 const inAL = (p) => p && p.type !== "PAGE" && p.type !== "SECTION" && "layoutMode" in p && p.layoutMode !== "NONE";
@@ -181,6 +182,7 @@ const ROLES = [
   ["Tabs Navigation", /^tabs\b|tab ?bar|tab ?navigation|tab group/i, null],
   ["Tab", /^tab\b/i, /tabs|navigation/i],
   ["Modal", /modal|dialog/i, null],
+  ["Side panel", /side ?panel|drawer|sheet/i, null],
   ["Breadcrumb", /bread ?crumb/i, null],
   ["Button", /^button$|^button\b(?!.*(icon|group|menu|hierarch))/i, null],
   ["Input", /^(input|text ?field|text input)\b/i, null],
@@ -220,6 +222,73 @@ function applyProps(inst, props) {
     try { inst.setProperties({ [key]: v }); } catch (e) { WARN.push("prop " + k + "=" + v); }
   }
 }
+/* The reference instance may be caught hovered, pressed or with sample icons on. New instances start from the
+   component's own defaults: state back to Default, icons off, and only size/type-like variants carried over. */
+const STATEY = /state|interaction|hover|focus|press|active|status/i;
+function keepProps(inst, props) {
+  const defs = inst.componentProperties || {}, out = {};
+  for (const [k, v] of Object.entries(props || {})) {
+    const key = Object.keys(defs).find((d) => d === k || d.split("#")[0] === k);
+    if (key && defs[key].type === "VARIANT" && !STATEY.test(k)) out[k] = v;
+  }
+  return out;
+}
+function resetState(inst, comp) {
+  const set = comp.parent && comp.parent.type === "COMPONENT_SET" ? comp.parent : null;
+  let pd = {}; try { pd = (set || comp).componentPropertyDefinitions || {}; } catch {}
+  const defs = inst.componentProperties || {}, next = {};
+  for (const [k, d] of Object.entries(defs)) {
+    const def = pd[k] || {};
+    if (d.type === "VARIANT" && STATEY.test(k)) {
+      const opts = def.variantOptions || [];
+      const v = opts.find((x) => /^(default|enabled|rest|normal|idle)$/i.test(x)) || def.defaultValue;
+      if (v && v !== d.value) next[k] = v;
+    } else if (d.type === "BOOLEAN") {
+      const want = /icon/i.test(k) && !/icon/i.test((set || comp).name) ? false : def.defaultValue;
+      if (typeof want === "boolean" && d.value !== want) next[k] = want;
+    }
+  }
+  if (Object.keys(next).length) { try { inst.setProperties(next); } catch {} }
+}
+/* Icons: the screen code asks by name; the app resolved each name to this file's icon component (by id or
+   library key) or to an SVG from the design-system package, which becomes a local component once. */
+const _icn = {};
+async function iconHolder() {
+  let h = page.children.find((n) => n.name === "Icons from the design system package");
+  if (!h) { h = figma.createFrame(); h.name = "Icons from the design system package"; page.appendChild(h); h.x = -4000; h.y = 0; h.layoutMode = "HORIZONTAL"; h.itemSpacing = 8; h.fills = []; h.layoutSizingHorizontal = "HUG"; h.layoutSizingVertical = "HUG"; }
+  return h;
+}
+async function iconComp(name) {
+  if (name in _icn) return _icn[name];
+  const d = (CTX.icons || {})[name]; let c = null;
+  if (d && d.id) { try { const n = await figma.getNodeByIdAsync(d.id); if (n && n.type === "COMPONENT") c = n; } catch (e) {} }
+  if (!c && d && d.k) { try { c = await figma.importComponentByKeyAsync(d.k); } catch (e) {} }
+  if (!c && d && d.svg) {
+    try { const h = await iconHolder(); c = h.children.find((n) => n.type === "COMPONENT" && n.name === "Icon / " + name) || null; if (!c) { const v = figma.createNodeFromSvg(d.svg); h.appendChild(v); c = figma.createComponentFromNode(v); c.name = "Icon / " + name; } } catch (e) { c = null; }
+  }
+  if (!c) WARN.push("icon not found: " + name);
+  return (_icn[name] = c);
+}
+/* icon: "name" (leading) or ["leading", "trailing"] (null to skip one side). */
+async function setIcon(inst, icon) {
+  if (!icon || !inst || inst.type !== "INSTANCE") return;
+  const want = Array.isArray(icon) ? icon : [icon, null];
+  const defs = inst.componentProperties || {};
+  const swaps = Object.keys(defs).filter((k) => defs[k].type === "INSTANCE_SWAP");
+  if (!swaps.length) { WARN.push("no icon slot in " + inst.name); return; }
+  const trail = (k) => /trail|right|end|after|suffix/i.test(k);
+  const lead = swaps.find((k) => !trail(k)) || swaps[0], tr = swaps.find((k) => trail(k)) || (swaps.length > 1 ? swaps[swaps.length - 1] : swaps[0]);
+  const plan = [[lead, want[0]], [tr, want[1]]].filter(([k, n]) => k && n);
+  for (const [key, nm] of plan) {
+    const comp = await iconComp(nm); if (!comp) continue;
+    const slot = inst.findOne((k) => k.type === "INSTANCE" && k.componentPropertyReferences && k.componentPropertyReferences.mainComponent === key);
+    const sz = slot ? [slot.width, slot.height] : null;
+    const on = {}; let p = slot; while (p && p !== inst) { const v = p.componentPropertyReferences && p.componentPropertyReferences.visible; if (v) on[v] = true; p = p.parent; }
+    if (!Object.keys(on).length) { for (const b of Object.keys(defs)) if (defs[b].type === "BOOLEAN" && /icon/i.test(b) && trail(b) === trail(key)) on[b] = true; }
+    try { inst.setProperties({ ...on, [key]: comp.id }); } catch (e) { WARN.push("icon " + nm + ": " + e.message); continue; }
+    if (sz) { const s2 = inst.findOne((k) => k.type === "INSTANCE" && k.componentPropertyReferences && k.componentPropertyReferences.mainComponent === key); if (s2 && (Math.abs(s2.width - sz[0]) > 0.5 || Math.abs(s2.height - sz[1]) > 0.5)) { try { s2.resize(sz[0], sz[1]); } catch (e) {} } }
+  }
+}
 async function I(parent, name, o = {}) {
   name = resolveName(name);
   const e = CTX.ex[name];
@@ -231,7 +300,9 @@ async function I(parent, name, o = {}) {
   if (!comp) { WARN.push("missing component " + name); const f = await F(parent, { name: name + " (missing)", pad: 8, stroke: "#d0d0d0" }); await T(f, name, { style: "Paragraph/Small/Regular" }); return f; }
   const inst = comp.createInstance();
   parent.appendChild(inst);
-  applyProps(inst, { ...(e ? e.props : {}), ...(o.props || {}) });
+  resetState(inst, comp);
+  applyProps(inst, { ...keepProps(inst, e ? e.props : {}), ...(o.props || {}) });
+  if (o.icon) await setIcon(inst, o.icon);
   if (o.text !== undefined) {
     const defs = inst.componentProperties || {};
     const tk = Object.keys(defs).find((d) => defs[d].type === "TEXT");
@@ -283,65 +354,147 @@ async function table(parent, headers, rows, o = {}) {
   if (rows.length > rws.length) WARN.push("table rows capped at " + rws.length);
   return dt;
 }
-const CHROME = /header|top ?bar|app ?bar|nav ?bar|side ?nav|sidebar|navigation|brow?swer|status ?bar|footer|logo|masthead|sticky/i;
+const CHROME = /header|top ?bar|app ?bar|nav ?bar|side ?nav|sidebar|navigation|browser|broswer|status ?bar|footer|logo|masthead|sticky/i;
+const OVERLAY = /scrim|overlay|modal|dialog|side ?panel|drawer|popover|toast|tooltip|snackbar/i;
 function isChrome(n) { return CHROME.test(n.name) && !/^content|^main|^body$/i.test(n.name); }
-/* The auto-layout container that holds the page's content: named content/main, else the largest auto-layout
-   frame that holds no app chrome. */
+/* App chrome by position, whatever the layers are called: bars stacked along the top and navigation along
+   the left. Returns the inner edges of the content area. */
+function chromeEdges(desk) {
+  const D = desk.absoluteBoundingBox;
+  const cand = desk.findAll((k) => k.visible && (k.type === "FRAME" || k.type === "INSTANCE" || k.type === "GROUP") && !OVERLAY.test(k.name))
+    .map((k) => ({ k, b: k.absoluteBoundingBox })).filter((x) => x.b).map((x) => ({ k: x.k, rx: x.b.x - D.x, ry: x.b.y - D.y, w: x.b.width, h: x.b.height }));
+  let top = 0;
+  for (const c of cand.slice().sort((a, b) => a.ry - b.ry)) if (c.ry <= top + 4 && c.rx <= 4 && c.w >= D.width * 0.6 && c.h <= 160 && c.ry + c.h > top) top = c.ry + c.h;
+  let left = 0;
+  for (const c of cand) if (c.rx <= 4 && c.w <= 340 && c.h >= (D.height - top) * 0.45 && c.ry <= top + 8 && c.rx + c.w > left) left = c.rx + c.w;
+  return { top, left, D };
+}
+const isChromeGeo = (n, E) => { const b = n.absoluteBoundingBox; if (!b) return false; const rx = b.x - E.D.x, ry = b.y - E.D.y; return (ry + b.height <= E.top + 4 && b.width >= E.D.width * 0.5) || (rx + b.width <= E.left + 4 && rx <= 4 && b.height >= E.D.height * 0.3) || (ry + b.height >= E.D.height - 4 && b.height <= 120 && b.width >= E.D.width * 0.5); };
+/* The content area: the largest frame inside the space the chrome leaves, preferring auto-layout. */
 function findContent(desk) {
   if (!desk || !("findAll" in desk)) return null;
-  const al = desk.findAll((n) => n.type === "FRAME" && n.layoutMode && n.layoutMode !== "NONE" && n.width >= desk.width * 0.45 && n.height >= desk.height * 0.3);
-  const named = al.filter((n) => /^(content|main|page content|main content)\b/i.test(n.name));
+  const E = chromeEdges(desk);
+  const W = E.D.width - E.left, H = E.D.height - E.top;
+  const named = desk.findAll((n) => n.type === "FRAME" && /^(content|main|page content|main content)\\b/i.test(n.name) && n.width >= W * 0.5);
   if (named.length) return named[named.length - 1];
-  const clean = al.filter((n) => !n.findOne((k) => k.type === "INSTANCE" && isChrome(k)) && n !== desk);
-  clean.sort((a, b) => b.width * b.height - a.width * a.height);
-  return clean[0] || null;
-}
-/* Removes what sits around the content area but isn't app chrome: tooltips, annotations, stray shapes. */
-function prune(desk, content) {
-  let node = content;
-  while (node && node.parent && node !== desk) {
-    const parent = node.parent;
-    for (const sib of [...parent.children]) { if (sib !== node && !(sib.type === "INSTANCE" && isChrome(sib)) && !(sib.type === "FRAME" && isChrome(sib))) sib.remove(); }
-    node = parent;
-  }
+  const inArea = desk.findAll((n) => {
+    if (n.type !== "FRAME" || !n.visible || OVERLAY.test(n.name)) return false;
+    let p = n.parent; while (p && p !== desk) { if (p.type === "INSTANCE") return false; p = p.parent; }
+    const b = n.absoluteBoundingBox; const rx = b.x - E.D.x, ry = b.y - E.D.y;
+    return rx >= E.left - 4 && ry >= E.top - 4 && b.width >= W * 0.6 && b.height >= H * 0.3 && !isChromeGeo(n, E);
+  });
+  inArea.sort((a, b) => (b.layoutMode && b.layoutMode !== "NONE" ? 1 : 0) - (a.layoutMode && a.layoutMode !== "NONE" ? 1 : 0) || b.width * b.height - a.width * a.height);
+  return inArea[0] || null;
 }
 async function clearContent(content, crumbs) {
   for (const c of [...content.children]) { if (!(c.type === "INSTANCE" && /bread ?crumb/i.test(c.name))) c.remove(); }
+  if (!content.layoutMode || content.layoutMode === "NONE") { content.layoutMode = "VERTICAL"; content.itemSpacing = 16; content.paddingTop = content.paddingBottom = content.paddingLeft = content.paddingRight = 24; content.counterAxisSizingMode = "FIXED"; }
+  try { content.primaryAxisSizingMode = "AUTO"; } catch {}
   const bc = content.children.find((c) => /bread ?crumb/i.test(c.name));
   if (bc && crumbs && crumbs.length) await crumbsTo(bc, crumbs);
   else if (crumbs && crumbs.length && CTX.ex[resolveName("Breadcrumb")]) { const b = await I(content, "Breadcrumb"); await crumbsTo(b, crumbs); }
 }
-/* Absolute-positioned screens: keep chrome along the top and left edges, remove the rest, and add an
-   auto-layout Content frame in the space that is left. */
-async function carveContent(desk, crumbs) {
-  let x0 = 0, y0 = 0;
-  for (const c of [...desk.children]) {
-    const top = c.y <= 4 && c.width >= desk.width * 0.6 && c.height <= 140;
-    const left = c.x <= 4 && c.width <= 340 && c.height >= desk.height * 0.5;
-    if (top || left || (c.type === "INSTANCE" && isChrome(c))) {
-      if (top) y0 = Math.max(y0, c.y + c.height);
-      if (left) x0 = Math.max(x0, c.x + c.width);
-      continue;
+/* Keep the app chrome (by position or name) and the path down to the content; remove open overlays
+   (scrim, modals, side panels, tooltips) and leftovers around the content. */
+function prune(desk, content) {
+  const E = chromeEdges(desk);
+  let node = content;
+  while (node && node.parent && node !== desk) {
+    const parent = node.parent;
+    for (const sib of [...parent.children]) {
+      if (sib === node) continue;
+      if (OVERLAY.test(sib.name)) { sib.remove(); continue; }
+      if (isChromeGeo(sib, E) || ((sib.type === "INSTANCE" || sib.type === "FRAME") && isChrome(sib))) continue;
+      sib.remove();
     }
-    if (/bread ?crumb/i.test(c.name)) { y0 = Math.max(y0, c.y + c.height); continue; }
-    c.remove();
+    node = parent;
   }
-  const content = await F(desk, { name: "Content", w: Math.round(desk.width - x0), pad: 24, gap: 16 });
-  content.x = x0; content.y = y0;
-  const bc = desk.children.find((c) => /bread ?crumb/i.test(c.name));
-  if (bc && crumbs && crumbs.length) await crumbsTo(bc, crumbs);
-  else if (crumbs && crumbs.length && CTX.ex[resolveName("Breadcrumb")]) { const b = await I(content, "Breadcrumb"); await crumbsTo(b, crumbs); }
+}
+/* Absolute-positioned screens with no content frame: keep the chrome, add an auto-layout Content frame
+   in the space that is left. */
+async function carveContent(desk, crumbs) {
+  const E = chromeEdges(desk);
+  for (const c of [...desk.children]) { if (OVERLAY.test(c.name) || !(isChromeGeo(c, E) || isChrome(c))) c.remove(); }
+  const content = await F(desk, { name: "Content", w: Math.round(desk.width - E.left), pad: 24, gap: 16 });
+  if (desk.layoutMode && desk.layoutMode !== "NONE") content.layoutPositioning = "ABSOLUTE";
+  content.x = E.left; content.y = E.top;
+  if (crumbs && crumbs.length && CTX.ex[resolveName("Breadcrumb")]) { const b = await I(content, "Breadcrumb"); await crumbsTo(b, crumbs); }
   GROW.push([desk.id, content.id]);
   return content;
 }
 const GROW = [];
+/* Desktop screens are 1080 px tall by default; a screen grows only when its content (or an open modal)
+   needs more. Full-height chrome (side navigation, scrim, side panel) follows, bottom bars stay at the bottom. */
+const DESK_H = 1080;
 async function growShells() {
-  for (const [d, c] of GROW) { const desk = await figma.getNodeByIdAsync(d), ct = await figma.getNodeByIdAsync(c); if (desk && ct) { const need = ct.y + ct.height + 24; if (need > desk.height) desk.resize(desk.width, need); } }
+  for (const [, deskId] of SNAPS) {
+    const desk = await figma.getNodeByIdAsync(deskId);
+    if (!desk || desk.width < 1024) continue;
+    const D = desk.absoluteBoundingBox; const E = chromeEdges(desk);
+    const bottomOf = (n) => { const b = n.absoluteBoundingBox; return b ? b.y - D.y + b.height : 0; };
+    const g = GROW.find((x) => x[0] === deskId);
+    const content = g ? await figma.getNodeByIdAsync(g[1]) : findContent(desk);
+    let need = 0;
+    if (content && "children" in content) { for (const k of content.children) if (k.visible) need = Math.max(need, bottomOf(k)); need += (content.paddingBottom || 0) + 24; }
+    for (const [dl, dk, kind] of POSITION) if (dk === deskId && kind === "modal") { const n = await figma.getNodeByIdAsync(dl); if (n) need = Math.max(need, bottomOf(n) + 48); }
+    const oldH = desk.height;
+    const kids = desk.children.filter((c) => c.visible);
+    const bottoms = kids.filter((c) => Math.abs(c.y + c.height - oldH) <= 2 && c.height <= 120 && c.width >= desk.width * 0.5 && c.y > oldH * 0.5);
+    const tall = kids.filter((c) => !bottoms.includes(c) && Math.abs(c.y + c.height - oldH) <= 2 && c.y <= E.top + 8 && c.height >= oldH * 0.4);
+    need += bottoms.reduce((a, c) => Math.max(a, c.height), 0);
+    const H = Math.max(DESK_H, Math.ceil(need));
+    if (Math.abs(H - oldH) < 1) continue;
+    if (desk.layoutMode && desk.layoutMode !== "NONE") { try { desk.layoutSizingVertical = "FIXED"; } catch (e) {} }
+    desk.resize(desk.width, H);
+    for (const t of tall) { if (Math.abs(t.y + t.height - H) > 2) { try { t.resize(t.width, Math.max(1, H - t.y)); } catch (e) {} } }
+    for (const b of bottoms) { if (Math.abs(b.y + b.height - H) > 2) b.y = H - b.height; }
+    const fr = desk.parent;
+    if (fr && fr.type === "FRAME" && (!fr.layoutMode || fr.layoutMode === "NONE")) fr.resize(fr.width, desk.y + H);
+  }
+}
+/* Modals and side panels go ON TOP of the screen, the way the product shows them: a scrim below the
+   top bar and the dialog centered (modal) or docked right at full height (side panel). Returns { dialog, body }:
+   put the form fields / text into body; actions are library Buttons in the footer. */
+async function modal(screen, o = {}) {
+  const desk = screen.desk || screen.frame;
+  const E = chromeEdges(desk);
+  const kind = /side|panel|drawer/i.test(o.kind || "") ? "sidepanel" : "modal";
+  const sotM = (CTX.sotModals || []).find((m) => (kind === "sidepanel" ? /side|panel|drawer/i : /modal|dialog/i).test(m.name));
+  const w = o.width || (sotM ? sotM.w : kind === "sidepanel" ? 400 : 480);
+  const scrim = figma.createRectangle(); desk.appendChild(scrim);
+  if (desk.layoutMode && desk.layoutMode !== "NONE") scrim.layoutPositioning = "ABSOLUTE";
+  scrim.name = "Scrim"; scrim.resize(desk.width, Math.max(10, desk.height - E.top)); scrim.x = 0; scrim.y = E.top;
+  scrim.fills = [{ type: "SOLID", color: { r: 0, g: 0, b: 0 }, opacity: 0.4 }];
+  const dlg = await F(desk, { name: (kind === "sidepanel" ? "Side panel · " : "Modal · ") + (o.title || ""), w, pad: 24, gap: 16, radius: kind === "sidepanel" ? 0 : 8, bg: "surface" });
+  if (desk.layoutMode && desk.layoutMode !== "NONE") dlg.layoutPositioning = "ABSOLUTE";
+  dlg.effects = [{ type: "DROP_SHADOW", color: { r: 0, g: 0, b: 0, a: 0.18 }, offset: { x: 0, y: 8 }, radius: 24, spread: 0, visible: true, blendMode: "NORMAL" }];
+  const head = await F(dlg, { name: "Title", dir: "H", fillW: true, gap: 8, align: "CENTER" });
+  await T(head, o.title || "Title", { style: "Heading/(H3) Subsection Title", fillW: true });
+  if (CTX.ex[resolveName("Button Icon")]) { try { await I(head, "Button Icon", { name: "Close", icon: "close" }); } catch {} }
+  const body = await F(dlg, { name: "Body", fillW: true, gap: 12 });
+  if (o.text) await T(body, o.text, { style: "Paragraph/Default/Regular", fillW: true });
+  if (o.actions && o.actions.length) {
+    const foot = await F(dlg, { name: "Footer", dir: "H", fillW: true, gap: 8, justify: "MAX" });
+    for (const a of o.actions) await I(foot, "Button", { text: a.label || a, icon: a.icon, props: a.primary ? { Hierachy: "Primary", Hierarchy: "Primary" } : { Hierachy: "Secondary", Hierarchy: "Secondary" } });
+  }
+  if (kind === "sidepanel") { dlg.x = desk.width - w; dlg.y = E.top; try { dlg.layoutSizingVertical = "FIXED"; } catch {} dlg.resize(w, Math.max(200, desk.height - E.top)); }
+  else { dlg.x = Math.round(E.left + (desk.width - E.left - w) / 2); dlg.y = E.top + 96; }
+  POSITION.push([dlg.id, desk.id, kind, E.top, E.left, w]);
+  return { dialog: dlg, body };
+}
+/* Re-center modals once their content is in (height known). */
+const POSITION = [];
+async function placeOverlays() {
+  for (const [d, k, kind, top, left, w] of POSITION) {
+    const dlg = await figma.getNodeByIdAsync(d), desk = await figma.getNodeByIdAsync(k);
+    if (!dlg || !desk) continue;
+    if (kind === "modal") dlg.y = Math.round(top + Math.max(48, Math.min(160, (desk.height - top - dlg.height) / 2)));
+  }
 }
 async function shell(spec) {
   const { id, name, state, acs, desc, crumbs, index } = spec;
   const full = id + " · " + name + (state ? " · " + state : "");
-  let frame, content;
+  let frame, content, deskOut = null;
   const ex = CTX.screen ? await figma.getNodeByIdAsync(CTX.screen) : null;
   const captioned = ex && ex.children && ex.children[0] && /^caption/i.test(ex.children[0].name) && ex.children[1];
   if (ex && captioned) {
@@ -351,8 +504,10 @@ async function shell(spec) {
     if (cap) { cap.name = "Caption · " + id; await setTexts(cap, [full, acs || "", desc || ""]); }
     const desk = frame.children[1];
     if (desk) desk.name = id + " · Desktop / " + name + (state ? " · " + state : "");
-    content = findContent(desk) || desk;
-    await clearContent(content, crumbs);
+    deskOut = desk;
+    content = findContent(desk);
+    if (content) { prune(desk, content); await clearContent(content, crumbs); }
+    else content = await carveContent(desk, crumbs);
   } else if (ex) {
     /* Reference screens without a caption (any naming): keep the file's own shell, chrome included, and
        empty only its content area. */
@@ -364,8 +519,9 @@ async function shell(spec) {
     const desk = ex.clone();
     frame.appendChild(desk);
     desk.name = id + " · Desktop / " + name + (state ? " · " + state : "");
+    deskOut = desk;
     content = findContent(desk);
-    if (content) { prune(desk, content); await clearContent(content, crumbs); if (content.layoutMode && content.layoutMode !== "NONE") { try { content.primaryAxisSizingMode = "AUTO"; } catch {} } }
+    if (content) { prune(desk, content); await clearContent(content, crumbs); }
     else content = await carveContent(desk, crumbs);
   } else {
     frame = await F(page, { name: full, w: 1366, gap: 24 });
@@ -373,7 +529,8 @@ async function shell(spec) {
     await T(cap, full, { style: "Heading/(H2) Section Title", fillW: true });
     await T(cap, acs || "", { style: "Paragraph/Default/Regular", color: "textSecondary", fillW: true });
     await T(cap, desc || "", { style: "Paragraph/Default/Regular", color: "textSecondary", fillW: true });
-    const desk = await F(frame, { name: id + " · Desktop / " + name, w: 1366, h: 1120, bg: "canvas", gap: 0 });
+    const desk = await F(frame, { name: id + " · Desktop / " + name, w: 1366, h: 1080, bg: "canvas", gap: 0 });
+    deskOut = desk;
     await I(desk, "App Header", { fillW: true });
     const body = await F(desk, { name: "Body", dir: "H", fillW: true, fillH: true, gap: 0 });
     await I(body, "Sidebar Navigation", { fillH: true });
@@ -385,7 +542,8 @@ async function shell(spec) {
   frame.x = ${GRID.x0} + (index % ${GRID.cols}) * ${GRID.colW + GRID.gapX};
   frame.y = ${GRID.y0} + Math.floor(index / ${GRID.cols}) * ${GRID.rowH};
   CREATED.push(frame.id);
-  return { frame, content };
+  SNAPS.push([id, (deskOut || frame).id, name, state || ""]);
+  return { frame, content, desk: deskOut };
 }
 async function crumbsTo(bc, crumbs) {
   const hasText = (k) => k.visible && (k.type === "TEXT" || ("findOne" in k && !!k.findOne((n) => n.type === "TEXT")));
@@ -418,7 +576,7 @@ async function notice(parent, severity, title, message, actions = []) {
 async function pageHeader(content, title, actions = []) {
   const h = await F(content, { name: "Page header", dir: "H", fillW: true, gap: 16, align: "CENTER" });
   const t = await T(h, title, { style: "Heading/(H2) Section Title", fillW: true });
-  for (const a of actions) await I(h, "Button", { props: a.props || {}, text: a.label || a });
+  for (const a of actions) await I(h, "Button", { props: a.props || {}, text: a.label || a, icon: a.icon });
   return h;
 }
 `);
@@ -524,6 +682,27 @@ if (!s) {
   CREATED.push(s.id);
 } else f = s.children.find((c) => c.type === "FRAME" && c.name === P.frame);
 for (const k of P.cards) {
+  if (k.board) {
+    /* Review notes board: one column per kind, a note card per item (title, body, affects, answer, status). */
+    const TONE = { warn: "#fff4d6", accent: "#e8efff", ok: "#e3f6e8" };
+    const row = await F(f, { name: "Board" + (k.part ? " · part " + k.part : ""), dir: "H", w: 1700, gap: 16 });
+    row.counterAxisAlignItems = "MIN";
+    for (const col of k.board) {
+      const c = await F(row, { name: "Column · " + col.title, fillW: true, pad: 16, gap: 12, radius: 8, bg: "surface" });
+      c.strokes = [{ type: "SOLID", color: hex("#e6e6e6") }]; c.strokeWeight = 1;
+      await T(c, col.title + " · " + col.items.length, { style: "Heading/(H3) Subsection Title", fillW: true });
+      for (const it of col.items) {
+        const card = await F(c, { name: "Note · " + it.title, fillW: true, pad: 12, gap: 6, radius: 6 });
+        card.fills = [{ type: "SOLID", color: hex(TONE[col.tone] || "#f5f5f5") }];
+        await T(card, (it.done ? "✓ " : "") + it.title, { style: "Paragraph/Default/Bold", fillW: true });
+        if (it.body) await T(card, it.body, { style: "Paragraph/Default/Regular", fillW: true });
+        if (it.affects) await T(card, "Affects: " + it.affects, { style: "Paragraph/Small/Regular", color: "textSecondary", fillW: true });
+        await T(card, it.answer ? "Answer: " + it.answer : "Answer: —", { style: "Paragraph/Small/Regular", color: "textSecondary", fillW: true });
+      }
+      if (!col.items.length) await T(c, "Nothing here.", { style: "Paragraph/Small/Regular", color: "textSecondary", fillW: true });
+    }
+    continue;
+  }
   if (k.kpis) {
     const row = await F(f, { name: "KPIs · Scope facts", dir: "H", w: 1700, gap: 16 });
     for (const [label, value] of k.kpis) { const b = await F(row, { name: "KPI · " + label, fillW: true, pad: 24, gap: 4, radius: 4, bg: "surface" }); await T(b, value, { style: "Heading/(H2) Section Title", fillW: true }); await T(b, label, { style: "Paragraph/Small/Regular", color: "textSecondary", fillW: true }); }
@@ -534,14 +713,21 @@ for (const k of P.cards) {
 s.resizeWithoutConstraints(1900, f.height + 200);
 return { created: CREATED, warnings: [...new Set(WARN)] };`;
 }
-export function docsCalls(ctx, pageId, mainId, data) {
+/* A board too big for one call is split into several boards with up to 8 notes per column. */
+function splitBoard(review) {
+  const b = review?.[0]?.board; if (!b) return [];
+  const n = Math.max(1, ...b.map((c) => Math.ceil(c.items.length / 8)));
+  return Array.from({ length: n }, (_, i) => ({ board: b.map((c) => ({ ...c, items: c.items.slice(i * 8, i * 8 + 8) })), part: n > 1 ? i + 1 : 0 }));
+}
+export function docsCalls(ctx, pageId, mainId, data, only = null) {
   const calls = [];
-  const sections = [[data.handoffName, "Handoff", data.handoffTitle, data.handoffSub, data.handoff], [data.comparisonName, "Comparison", data.comparisonTitle, data.comparisonSub, data.comparison]];
+  const sections = [[data.handoffName, "Handoff", data.handoffTitle, data.handoffSub, data.handoff], [data.reviewName, "Review notes", data.reviewTitle, data.reviewSub, splitBoard(data.review)], [data.comparisonName, "Comparison", data.comparisonTitle, data.comparisonSub, data.comparison]];
   for (const [name, frame, title, sub, cards] of sections) {
+    if (only && !only.includes(frame)) continue;
     let part = { name, frame, title, sub, cards: [] };
     const flush = () => { if (part.cards.length) calls.push(docsPartCode(ctx, pageId, mainId, part)); part = { name, frame, title, sub, cards: [] }; };
     for (const k0 of cards) {
-      const k = k0.kpis ? k0 : { ...k0, title: clip(k0.title, 120), note: clip(k0.note, 300), rows: k0.rows.map((r) => r.map((c) => clip(c))) };
+      const k = k0.kpis || k0.board ? k0 : { ...k0, title: clip(k0.title, 120), note: clip(k0.note, 300), rows: k0.rows.map((r) => r.map((c) => clip(c))) };
       /* A card bigger than one call on its own is split by rows. */
       const pieces = [];
       if (k.rows && docsPartCode(ctx, pageId, mainId, { ...part, cards: [k] }).length > CODE_LIMIT) {
@@ -564,7 +750,8 @@ export function screensCode(ctx, pageId, sectionId, body) {
 const SECTION_ID = ${JSON.stringify(sectionId)};
 ${body}
 await growShells();
-return { created: CREATED, warnings: [...new Set(WARN)] };`;
+await placeOverlays();
+return { created: CREATED, warnings: [...new Set(WARN)], snaps: SNAPS };`;
 }
 
 /* ---------- Content for the Feature Card and the documentation sections ---------- */
@@ -598,7 +785,26 @@ export function cardTexts(pageName, ado, res, cfg, pipe) {
   };
 }
 
+/* Follow the handoff structure of the file / SOT: when a reference card covers the same topic with the
+   same number of columns, its column names and widths are used. */
+const TOPIC = [[/ac coverage|requirement|coverage/i, /ac coverage|requirement|coverage/i], [/open questions|release gates/i, /question|decision|gate/i], [/accessib/i, /accessib/i], [/system|regional|behavio/i, /system|behavio|region|lifecycle/i], [/recommendation|status/i, /recommend|status|next step/i], [/stories/i, /stor/i]];
+function followRef(cards, refCards) {
+  if (!refCards?.length) return cards;
+  return cards.map((c) => {
+    if (!c.cols) return c;
+    const t = TOPIC.find(([mine]) => mine.test(c.title));
+    const ref = t && refCards.find((rc) => t[1].test(rc.name) && rc.head?.length === c.cols.length);
+    if (!ref) return c;
+    const cols = ref.head.map((h, i) => { const [label, w] = h.split(":"); return [label || c.cols[i][0], Number(w) > 40 ? Number(w) : c.cols[i][1]]; });
+    const total = cols.reduce((a, x) => a + x[1], 0);
+    return { ...c, cols: total > 1700 || total < 1200 ? cols.map(([l], i) => [l, c.cols[i][1]]) : cols };
+  });
+}
 export function docsData(pageName, ado, res, ctx, plan, cfg) {
+  const d = docsDataBase(pageName, ado, res, ctx, plan, cfg);
+  return { ...d, handoff: followRef(d.handoff, (ctx.handoff || ctx.sot?.handoff)?.cards) };
+}
+function docsDataBase(pageName, ado, res, ctx, plan, cfg) {
   const id = draftIdOf(pageName);
   const feat = (ado.title || "New feature").replace(/\s*\(.*?\)/g, "");
   const screensFor = (ac) => plan.filter((s) => (s.acs || "").includes(ac)).map((s) => s.id.split(".").pop().padStart(2, "0")).join(" / ") || "—";
@@ -623,14 +829,22 @@ export function docsData(pageName, ado, res, ctx, plan, cfg) {
       { title: "Recommendation & handoff status", note: "Proposal for design review. No stakeholder sign-off is implied.", cols: [["Step", W([320, 1316])[0]], ["Action", W([320, 1316])[1]]],
         rows: [["1 · Review this flow", `Walk the ${plan.length} screens with ${ado.po || "the Product Owner"}.`], ["2 · Resolve open questions", `${res.ux.gaps.length + openQ.length} decisions listed above.`], ...res.reviewNotes.recommendations.slice(0, 5).map((r, i) => [`${i + 3} · ${r.title}`, r.body]), [`${Math.min(res.reviewNotes.recommendations.length, 5) + 3} · Sign-off`, "Attach the final ADO and obtain Product, Design and Engineering approval."]] },
     ],
+    reviewName: `${id} · Review notes — open questions, recommendations & accessibility`,
+    reviewTitle: `${feat} · Review notes`,
+    reviewSub: `${id} · for the review with ${ado.po || "the Product Owner"}${ado.stakeholders ? ` and ${ado.stakeholders}` : ""} · answers and decisions go back into the pipeline`,
+    review: [{ board: [
+      { title: "Open questions", tone: "warn", items: [...res.reviewNotes.openQuestions, ...res.ux.gaps.filter((g) => !res.reviewNotes.openQuestions.some((q) => q.title === g.title)).map((g) => ({ title: g.title, body: g.ask || g.detail, affects: g.category, answer: g.answer || "", done: false }))].map((q) => ({ title: clip(q.title, 90), body: clip(q.body, 260), affects: clip(q.affects || "", 120), answer: clip(q.answer || "", 200), done: !!q.done })) },
+      { title: "Recommendations", tone: "accent", items: res.reviewNotes.recommendations.map((q) => ({ title: clip(q.title, 90), body: clip(q.body, 260), affects: clip(q.affects || "", 120), answer: clip(q.answer || "", 200), done: !!q.done })) },
+      { title: "Accessibility", tone: "ok", items: res.reviewNotes.accessibility.map((q) => ({ title: clip(q.title, 90), body: clip(q.body, 260), affects: clip(q.affects || "", 120), answer: clip(q.answer || "", 200), done: !!q.done })) },
+    ] }],
     comparisonName: `${id} · Comparison — existing Figma, design system & new requirements`,
     comparisonTitle: "Approach comparison · Existing Figma + design system",
     comparisonSub: `One ADO-driven proposal. Same structure as ${ctx.refPage || "the reference page"}.`,
     comparison: [
       { kpis: [["Pages in the sitemap", String(ctx.sitemap.length)], ["Acceptance criteria traced", String(res.validation.length)], ["Designed UI states", String(plan.length)], ["Open questions", String(res.ux.gaps.length + openQ.length)]] },
-      { title: "Design system vs. local precedent", note: `Design system: ${cfg.dsName}.`, cols: [["Aspect", W([260, 700, 660])[0]], ["Drift", W([260, 700, 660])[1]], ["Decision", W([260, 700, 660])[2]]], rows: res.drift.map((d) => [d.aspect, d.drift, d.rec]) },
+      { title: "Design system vs. source of truth", note: `Design system (base): ${cfg.dsName}. Source of truth: ${ctx.sot ? ctx.sot.pages.join(" · ") : "not read"}. Where they differ, the design follows the SOT for structure and component use and the design system for tokens.`, cols: [["Aspect", W([260, 700, 660])[0]], ["Drift", W([260, 700, 660])[1]], ["Decision", W([260, 700, 660])[2]]], rows: res.drift.map((d) => [d.aspect, d.drift, d.rec]) },
       { title: "Method and caveats", note: "Evidence is limited to the ADO, the PRD template, the design-system package and the Figma file read before generating.", cols: [["Source", W([320, 1316])[0]], ["What was used", W([320, 1316])[1]]],
-        rows: [["Figma file", `${ctx.sitemap.length} pages inventoried; reference page “${ctx.refPage || "—"}”; ${Object.keys(ctx.exemplars).length} library components and ${Object.keys(ctx.styles).length} text styles reused.`], ["Work item", `${ado.id || "ADO"} · ${res.validation.length} acceptance criteria · ${res.stories.length} stories.`], ["Analysis", `${res.engine}. Ratings and gaps need Product Owner review.`], ["Limits", "Screens are a draft built from library components; data in tables is illustrative. Review in Figma before handoff."]] },
+        rows: [["Figma file", `${ctx.sitemap.length} pages inventoried; reference page “${ctx.refPage || "—"}”; ${Object.keys(ctx.exemplars).length} library components and ${Object.keys(ctx.styles).length} text styles reused.`], ["Source of truth", ctx.sot ? `${ctx.sot.pages.join(" · ")}: ${ctx.sot.screens.length} screens, ${ctx.sot.modals.length} modal patterns and ${ctx.sot.handoff ? "its handoff structure" : "no handoff"} used as the reference for structure, components and handoff.` : "Not read (no SOT URL)."], ["Design system", `${cfg.dsName}: tokens and component rules used as the base.`], ["Work item", `${ado.id || "ADO"} · ${res.validation.length} acceptance criteria · ${res.stories.length} stories.`], ["Analysis", `${res.engine}. Ratings and gaps need Product Owner review.`], ["Limits", "Screens are a draft built from library components; data in tables is illustrative. Review in Figma before handoff."]] },
     ],
   };
 }
@@ -643,6 +857,7 @@ Rules:
 - Number N from 1. 8–14 screens. Cover every AC marked Designed in the validation matrix.
 - Like the reference, include the states the brief implies: empty / no results, error with recovery, loading, no permission, confirmation dialogs, warnings, success.
 - Names follow the reference style, e.g. "Store list · synced market", "Failed sync · actionable error".
+- When the context has a SOURCE OF TRUTH section, follow how its real screens are named, split and ordered (which states get their own screen, how modals and confirmations are shown).
 
 ${contextText}
 
@@ -654,13 +869,14 @@ export function batchPrompt(brief, contextText, screens, draftId, prevError, max
   return `You write Figma Plugin API JavaScript that builds product screens inside an existing design file, reusing its library components exactly the way the reference page does.
 
 Your code runs after a prelude that switched to the right page and defines these async helpers. Use ONLY them (no figma.create*, no setCurrentPageAsync, no return, no IIFE). Top-level await is allowed; await every helper.
-- const { frame, content } = await shell({ id, name, state, acs, desc, crumbs, index })
+- const screen = await shell({ id, name, state, acs, desc, crumbs, index }) → returns { frame, content, desk }.
     Creates one screen by cloning the reference screen of THIS file: caption (title · AC line · description) plus the file's own app chrome (header, navigation, breadcrumb), placed in the Main design grid. content = the vertical auto-layout content frame of that screen (its width follows the reference). index = 0-based position of the screen on the page (given below).
-- await pageHeader(content, "Title", [{ label: "Action", props: { Hierachy: "Secondary" } }])  → title row with library Buttons.
-- await I(parent, "<Library component name>", { props: { Variant: "value" }, text: "label" | ["t1","t2"], fillW, w, h, name })  → library instance; props are variant/boolean properties shown in the context; text sets the component's text property or its text layers in order.
+- await pageHeader(content, "Title", [{ label: "Action", icon: "add", props: { Hierachy: "Secondary" } }])  → title row with library Buttons.
+- await I(parent, "<Library component name>", { props: { Variant: "value" }, text: "label" | ["t1","t2"], icon: "name" | ["leading", "trailing"], fillW, w, h, name })  → library instance; props are variant properties shown in the context; text sets the component's text property or its text layers in order; icon puts icons from "Icons available" in the component's icon slots (use null for a side you don't want).
 - await clone(parent, "<Library component name>", { fillW, name })  → exact copy of the reference instance (composites such as "Filter" or "Advanced Pagination"); then await setTexts(node, ["text 1", ...]) to change its visible texts in order.
 - await table(parent, ["HEADER", ...], [["cell", ...], ...], { pagination: true|false, pages: 156 })  → the reference library Data Table; respect its column count, row limit and which columns are Tag columns (see context).
 - await tabs(parent, ["Tab 1", "Tab 2"])  → library Tabs Navigation with these labels (first is active).
+- const { body } = await modal(screen, { kind: "modal"|"sidepanel", title, text, actions: [{ label: "Cancel" }, { label: "Confirm", primary: true, icon: "check" }], width })  → draws the dialog ON TOP of the screen like the product does: scrim below the top bar, modal centered or side panel docked right at full height. screen = the object returned by shell(). Put fields, notices or tables into body.
 - await notice(parent, "Info"|"Success"|"Warning"|"Error", "Title", "Message", ["Action"])  → library Notification; omit actions to hide its buttons.
 - await F(parent, { name, dir: "H"|"V", gap, pad, px, py, fillW, fillH, w, h, align: "CENTER"|"MIN"|"MAX", justify: "MIN"|"CENTER"|"MAX"|"SPACE_BETWEEN", bg: "surface"|"canvas", radius, wrap })  → auto-layout frame.
 - await T(parent, "text", { style: "<text style name>", color: "textPrimary"|"textSecondary", fillW, w, name })  → text with the file's text styles.
@@ -669,10 +885,15 @@ Rules:
 - Build exactly these screens, in order:
 ${screens.map((s) => `  index ${s.index}: ${JSON.stringify({ id: s.id, name: s.name, state: s.state, acs: s.acs, desc: s.desc, crumbs: s.crumbs })}`).join("\n")}
 - Follow the reference anatomy order inside Content: Breadcrumb (from shell) → Page header → context line (Paragraph/Small/Regular, textSecondary) → Tabs / filters → dataset title + actions → summary line → Data Table / form / message → secondary actions.
+- Every screen keeps the app chrome of the shell (top header, side navigation): never remove or rebuild it.
+- Desktop screens are 1080 px tall by default; the app makes a screen taller only when its content needs it. Don't add filler to reach the height, don't stretch content to fill it, and don't resize the screen yourself.
+- Confirmations, warnings, edit forms and download dialogs are overlays: build the screen underneath as usual, then call modal(screen, …). Never place a dialog inside the content flow. Use kind "sidepanel" where the SOT uses side panels for editing.
+- Mix the two references: the design system in the brief is the base (tokens, component rules); the SOURCE OF TRUTH section shows how the product applies it. Build screens, modals, empty/error states and tables the way the SOT does (structure, which component goes where, action order in dialogs); prefer components marked SOT.
 - Component names: use the names listed under "Library components available" in the context. Role names (App Header, Sidebar Navigation, Data Table, Notification, Tabs Navigation, Tab, Modal, Breadcrumb, Button, Input, Dropdown, Tag, Toggle, Checkbox, Filter, Advanced Pagination, Card) are mapped to this file's equivalent automatically, so they are safe too. Never invent other names.
 - Build every control from a library component (buttons, inputs, dropdowns, toggles, tags, tabs, tables, messages, dialogs). Plain frames only for layout; T only for headings and body text.
 - Prefer library components over frames. Use real labels and realistic sample data from the brief. Status always as Tag with words. One primary Button per screen.
-- Dialogs/warnings: build the underlying screen, then a Notification or a centered card frame on top using F with bg "surface".
+- Icons: suggest an icon for every Button (pageHeader actions, modal actions, I(…, "Button")) that matches its action: add, edit, delete, download, upload, filter, search, refresh, swap/change, settings, back… Add a trailing arrow (["…", "arrow_forward"]) only on actions that move the user forward. Use only names listed under "Icons available"; if none fits, leave the icon out. Icon-only buttons and table/row actions follow the SOT. Never set the components' state, hover or icon-visibility properties yourself.
+- Dialogs/warnings: build the underlying screen, then call modal(screen, …); inline warnings inside the page use notice().
 - HARD LIMIT: under ${Math.min(maxChars, 4500 * screens.length).toLocaleString()} characters in total (Figma rejects longer code). Define small local helper functions and loops to avoid repetition; keep sample data short.
 - Answer with JavaScript only. No Markdown fences, no prose.${prevError ? `\n- The previous attempt failed with: ${prevError}. Avoid it.` : ""}
 

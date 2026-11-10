@@ -220,7 +220,7 @@ export function priorSummary(res) {
    before the matrices (the last keys), leaving step 3 empty. */
 export function buildAnalysisPrompt(ado, ctx, part = "core") {
   const sections = ctx.sections.map((s) => `${s.id} ${s.title} – ${s.guidance || ""}`).join("\n");
-  const ds = ctx.dsFiles.map((f) => `--- ${f.path}\n${f.content}`).join("\n").slice(0, 60000);
+  const ds = ctx.dsFiles.filter((f) => !/\.svg$/i.test(f.path)).map((f) => `--- ${f.path}\n${f.content}`).join("\n").slice(0, 60000);
   return `You are a senior product designer and product analyst for ${ctx.productName || "an enterprise product"}. Convert a raw Azure DevOps work item into a structured PRD and a design-readiness review.
 
 DESIGN SYSTEM: ${ctx.dsName} · rule: ${ctx.dsRuleText}
@@ -369,11 +369,22 @@ export async function docxToText(buf) {
 export async function zipToFiles(buf) {
   const zip = await window.JSZip.loadAsync(buf);
   const files = [];
+  let svgN = 0, svgBytes = 0, svgSkipped = 0;
   for (const [path, f] of Object.entries(zip.files)) {
     if (f.dir || /__MACOSX|\/\./.test(path)) continue;
+    if (/\.svg$/i.test(path)) {
+      /* Icons: kept small (minified, size-capped) so the package still fits the shared settings. */
+      if (svgN >= 400) { svgSkipped++; continue; }
+      const svg = (await f.async("string")).replace(/<\?xml[^>]*>|<!--[\s\S]*?-->|<!DOCTYPE[^>]*>/gi, "").replace(/\s+/g, " ").replace(/>\s+</g, "><").trim();
+      if (!/<svg/i.test(svg) || svg.length > 6000 || svgBytes + svg.length > 500000) { svgSkipped++; continue; }
+      svgN++; svgBytes += svg.length;
+      files.push({ path, content: svg });
+      continue;
+    }
     if (!/\.(md|markdown|json|txt|css|ya?ml)$/i.test(path)) continue;
     files.push({ path, content: await f.async("string") });
   }
+  files.svgSkipped = svgSkipped;
   const top = files.length && files.every((f) => f.path.includes("/")) ? files[0].path.split("/")[0] + "/" : "";
   if (top && files.every((f) => f.path.startsWith(top))) files.forEach((f) => (f.path = f.path.slice(top.length)));
   return files.sort((a, b) => a.path.localeCompare(b.path));

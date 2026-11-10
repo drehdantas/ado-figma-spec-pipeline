@@ -42,7 +42,19 @@ export async function openStore({ seed }) {
         cb(out);
       }, (e) => onErr && onErr(e));
     },
-    savePipeline(p) { return write(db.collection("pipelines").doc(p.id), JSON.parse(JSON.stringify(p))); },
+    /* With keys, only those fields are written (merged), so two people editing different parts of the
+       same pipeline don't overwrite each other. */
+    savePipeline(p, keys) {
+      const ref = db.collection("pipelines").doc(p.id);
+      if (keys && keys.length && ref.update) {
+        const patch = JSON.parse(JSON.stringify(Object.fromEntries(keys.map((k) => [k, p[k] === undefined ? null : p[k]]))));
+        const prev = queue.get(ref.path) || Promise.resolve();
+        const next = prev.catch(() => {}).then(() => ref.update(patch)).catch(() => ref.set(JSON.parse(JSON.stringify(p))));
+        queue.set(ref.path, next);
+        return next;
+      }
+      return write(ref, JSON.parse(JSON.stringify(p)));
+    },
     deletePipeline(id) { return db.collection("pipelines").doc(id).delete(); },
     async getDoc(col, id) { const s = await db.collection(col).doc(id).get(); return s.exists ? s.data() : null; },
     saveDoc(col, id, data) { return write(db.collection(col).doc(id), data); },

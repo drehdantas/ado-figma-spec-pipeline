@@ -1,6 +1,6 @@
 {
   "name": "ado-figma-spec-pipeline",
-  "version": "1.2.0",
+  "version": "1.3.0",
   "description": "Turn Azure DevOps work items into a structured PRD, a UX readiness audit, validation and drift matrices, and a draft design page in Figma built from your own design system.",
   "type": "module",
   "private": true,

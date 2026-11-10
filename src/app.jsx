@@ -1,28 +1,32 @@
 import React, { useEffect, useMemo, useRef, useState, useSyncExternalStore } from "react";
 import { createRoot } from "react-dom/client";
-import { GitCompare, ArrowLeft, ArrowRight, Plus, Loader2, CheckCircle2, XCircle, X, Copy, Figma, ClipboardPaste } from "lucide-react";
-import { Btn, Modal, Toast, Field, copyText } from "./ui.jsx";
+import { GitCompare, ArrowLeft, ArrowRight, Plus, Loader2, CheckCircle2, XCircle, X, Copy, Figma, ClipboardPaste, MessageSquare } from "lucide-react";
+import { Btn, Modal, Toast, Field, copyText, fmtDate } from "./ui.jsx";
 import { localAnalyze, buildAnalysisPrompt, parseJSONLoose, normalize, repairPrompt, priorSummary } from "./engine.js";
 import { Step2, Step3 } from "./steps23.jsx";
 import { Step1 } from "./step1.jsx";
 import { Step4, compile } from "./step4.jsx";
-import { Home } from "./home.jsx";
-import { ContextDrawer, saveFile } from "./drawer.jsx";
+import { Sidebar, Dashboard, PipelinesList, Products, Workspace } from "./views.jsx";
+import { team, useTeam, initTeam, initRoom, addActivity, pushPresence, statusOf, statusById } from "./team.js";
+import { StatusMenu, AssigneePicker, PresenceBar, ActivityPanel, NameDialog, Avatar } from "./teamui.jsx";
+import { ContextDrawer, saveFile, AICard } from "./drawer.jsx";
 import { openStore } from "./store.js";
 import { buildPdf } from "./pdf.js";
 import { mdForPrompt, imageBlobs, imageRefs } from "./mdeditor.jsx";
 import { DEFAULT_CONFIG, DEFAULT_NODE, DEFAULT_JOURNEY, PROFILE_KEYS, migrateConfig, activeDS, dsLabel, RULES, scopedConfig, pipeContext, productKey, cloneProfile, profileOf } from "./config.js";
 import { makeAI } from "./ai.js";
 import { jobStore, isRunning } from "./jobs.js";
-import { runFigmaBuild } from "./figma-runner.js";
-import { runFigmaPrototype } from "./prototype-figma.js";
+import { runFigmaBuild, recordSnaps } from "./figma-runner.js";
+import { protoTheme, renderScreens, wirePrompt, heuristicLinks, prototypeFile } from "./proto-render.js";
+import { mergeSnaps, renderSnap, spriteOf } from "./proto-snap.js";
+import { parseFigmaUrl, figmaErrorText } from "./figma.js";
 import { relatedPipelines, historyForSection, suggestPrompt } from "./suggest.js";
 import { DEMO_ADO, DEMO_ANALYSIS } from "./sample/demo.js";
 
 const EMPTY_ADO = { id: "", link: "", po: "", stakeholders: "", title: "", raw: "", designerNotes: "", images: {} };
 const uid = () => "p" + Date.now().toString(36) + Math.random().toString(36).slice(2, 6);
 const now = () => new Date().toISOString();
-const newPipeline = (over = {}) => ({ ctxV: 1, productName: "", sotUrl: "", journey: DEFAULT_JOURNEY, ownProfile: null, ado: EMPTY_ADO, res: null, step: 1, engine: "ai", figmaUrl: "", journeyNode: DEFAULT_NODE, analyzedRaw: "", figmaRuns: [], ...over, id: uid(), createdAt: now(), updatedAt: now() });
+const newPipeline = (over = {}) => ({ status: "draft", assignee: null, activity: [], ctxV: 1, productName: "", sotUrl: "", journey: DEFAULT_JOURNEY, ownProfile: null, ado: EMPTY_ADO, res: null, step: 1, engine: "ai", figmaUrl: "", journeyNode: DEFAULT_NODE, analyzedRaw: "", figmaRuns: [], ...over, id: uid(), createdAt: now(), updatedAt: now() });
 const SEED = { id: "example-store-locator", example: true, ctxV: 1, productName: "Example product", sotUrl: "", journey: DEFAULT_JOURNEY, createdAt: now(), updatedAt: now(), ado: { ...DEMO_ADO, stakeholders: "Jordan Lee (Engineering lead), Sam Park (Market A operations)" }, res: DEMO_ANALYSIS, step: 2, engine: "ai", figmaUrl: "", journeyNode: DEFAULT_NODE, analyzedRaw: DEMO_ADO.raw, figmaRuns: [] };
 
 const STEPS = [
@@ -56,7 +60,12 @@ function Stepper({ step, setStep, hasResult }) {
 /* What the analysis was made from: the ADO text plus the designer comments, so editing either enables converting again. */
 const analysisSig = (ado) => ado.raw + (ado.designerNotes?.trim() ? `\n\n[designer]\n${ado.designerNotes.trim()}` : "");
 
-function PipelineView({ cfg: wcfg, setCfg, pipe, setPipe, all, caps, ai, notify, guard, startBuild, proto, startPrototype }) {
+function PipelineView({ cfg: wcfg, setCfg, setAi, pipe, setPipe, all, caps, ai, notify, guard, startBuild, proto, loadProto, startPrototype }) {
+  const t = useTeam();
+  const log = (type, text) => setPipe((p) => ({ activity: addActivity(p, type, text) }));
+  useEffect(() => { pushPresence({ pid: pipe.id, step: pipe.step }); }, [pipe.id, pipe.step]);
+  useEffect(() => () => pushPresence({ pid: null, editingAt: 0 }), []);
+  const [showAct, setShowAct] = useState(false);
   const [drawer, setDrawer] = useState(() => { try { return localStorage.getItem("adoPipeline.drawer") !== "0"; } catch { return true; } });
   const [busy, setBusy] = useState(false);
   const [progress, setProgress] = useState("");
@@ -80,8 +89,9 @@ function PipelineView({ cfg: wcfg, setCfg, pipe, setPipe, all, caps, ai, notify,
     if (next.sotUrl !== cfg.sotUrl) patch.sotUrl = next.sotUrl;
     if (next.journey !== cfg.journey) patch.journey = next.journey;
     let w = wcfg;
-    if (next.ai !== cfg.ai) w = { ...w, ai: next.ai };
-    if (PROFILE_KEYS.some((key) => next[key] !== cfg[key])) {
+    if (next.ai !== cfg.ai) setAi(next.ai);
+    if (PROFILE_KEYS.some((key) => next[key] !== cfg[key]) && k && !t.admin) { notify("Only admins can change this product's PRD template, design system and style guide."); }
+    else if (PROFILE_KEYS.some((key) => next[key] !== cfg[key])) {
       const prof = Object.fromEntries(PROFILE_KEYS.map((key) => [key, next[key]]));
       if (k) w = { ...w, products: { ...w.products, [k]: { ...(w.products?.[k] || {}), name: w.products?.[k]?.name || pc.productName.trim(), ...prof, updatedAt: now() } } };
       else patch.ownProfile = prof;
@@ -103,6 +113,7 @@ function PipelineView({ cfg: wcfg, setCfg, pipe, setPipe, all, caps, ai, notify,
     const k = productKey(name);
     const current = cloneProfile(profileOf(wcfg, pipe));
     const patch = { ctxV: 1, productName: name, sotUrl: pc.sotUrl, journey: pc.journey, ownProfile: k ? null : current };
+    if (k && !wcfg.products?.[k] && !t.admin) { notify(`“${name}” isn't a product yet. Ask an admin to create it, or pick an existing one.`); return; }
     if (k && !wcfg.products?.[k]) { setCfg({ ...wcfg, products: { ...wcfg.products, [k]: { name, ...current, updatedAt: now() } } }); notify(`New product “${name}”. It starts with this pipeline's PRD template and design system.`); }
     else if (k) { const n = Object.values(all).filter((p) => p.id !== pipe.id && productKey(pipeContext(p, wcfg).productName) === k).length; notify(`Using the PRD template and design system of “${wcfg.products[k].name}”${n ? ` · shared with ${n} other pipeline${n > 1 ? "s" : ""}` : ""}`); }
     else notify("No product name: this pipeline keeps its own PRD template and design system.");
@@ -145,7 +156,7 @@ function PipelineView({ cfg: wcfg, setCfg, pipe, setPipe, all, caps, ai, notify,
     try {
       const m = await buildMatrices(res, adoForPrompt(), ctl.current.signal, (t) => setMx({ busy: true, progress: t }));
       setPipe((p) => ({ res: { ...p.res, ...m } }));
-      notify(`Matrices ready · ${m.validation.length} AC rows, ${m.drift.length} drift rows`);
+      log("matrices", m.matricesBy); notify(`Matrices ready · ${m.validation.length} AC rows, ${m.drift.length} drift rows`);
     } catch (e) { if (e?.code !== "cancelled") notify(e?.message || "Couldn't build the matrices."); }
     finally { setMx({ busy: false, progress: "" }); }
   };
@@ -156,7 +167,7 @@ function PipelineView({ cfg: wcfg, setCfg, pipe, setPipe, all, caps, ai, notify,
     g("Converting the ADO again", async () => {
       if (ado.raw === DEMO_ADO.raw && !ado.designerNotes?.trim()) { setPipe({ res: DEMO_ANALYSIS, step: 2, analyzedRaw: sig }); return; }
       const adoText = adoForPrompt();
-      if (engine === "local") { setPipe({ res: localAnalyze(adoText, ctx()), step: 2, analyzedRaw: sig }); notify("Analyzed with local rules"); return; }
+      if (engine === "local") { setPipe({ res: localAnalyze(adoText, ctx()), step: 2, analyzedRaw: sig }); log("converted", "local rules"); notify("Analyzed with local rules"); return; }
       setBusy(true); setProgress("Thinking…");
       ctl.current = new AbortController();
       try {
@@ -169,7 +180,7 @@ function PipelineView({ cfg: wcfg, setCfg, pipe, setPipe, all, caps, ai, notify,
         parsed.engine = ai.label;
         setProgress("2/2 · Building the validation & drift matrices…");
         const m = await buildMatrices(parsed, adoText, ctl.current.signal, (t) => setProgress(`2/2 · ${t}`));
-        setPipe({ res: { ...parsed, ...m }, step: 2, analyzedRaw: sig }); notify(/^Local/.test(m.matricesBy) ? "Analysis ready · matrices from local rules" : "Analysis ready");
+        setPipe({ res: { ...parsed, ...m }, step: 2, analyzedRaw: sig }); log("converted", ai.label); notify(/^Local/.test(m.matricesBy) ? "Analysis ready · matrices from local rules" : "Analysis ready");
       } catch (e) {
         if (e?.code === "cancelled") setErr("Stopped. Nothing was changed.");
         else if (e?.code === "not_granted") { setErr("AI access was declined, so the local rules engine was used instead."); setPipe({ res: localAnalyze(adoText, ctx()), step: 2, analyzedRaw: sig }); }
@@ -208,8 +219,24 @@ function PipelineView({ cfg: wcfg, setCfg, pipe, setPipe, all, caps, ai, notify,
 
   return (
     <>
-      <ContextDrawer cfg={cfg} setCfg={setScoped} productInfo={productInfo} setProductName={setProductName} pipe={pipe} setPipe={setPipe} notify={notify} open={drawer} setOpen={setDrawer} caps={caps} guard={(label, fn) => (/design system|package/i.test(label) ? fn() : g(label, fn))} />
       <main className="mx-auto flex max-w-7xl flex-col gap-5 px-gutter pb-16 pt-4">
+        <div className="flex flex-col gap-3 rounded-lg border border-line bg-surface p-4">
+          <div className="flex flex-wrap items-start justify-between gap-3">
+            <div className="min-w-0">
+              <p className="text-xs text-muted">{[cfg.productNameRaw || "No product", ado.id, ado.po && `PO ${ado.po}`].filter(Boolean).join(" · ")}</p>
+              <h2 className="truncate text-lg font-semibold">{ado.title || "New ADO"}</h2>
+              <p className="text-xs text-muted">{pipe.createdBy ? <>Created by {pipe.createdBy === t.me ? "you" : t.name(pipe.createdBy)}</> : "Created"} · {fmtDate(pipe.createdAt)}{pipe.updatedBy ? <> · last change by {pipe.updatedBy === t.me ? "you" : t.name(pipe.updatedBy)} {fmtDate(pipe.updatedAt)}</> : null}</p>
+            </div>
+            <div className="flex flex-wrap items-center gap-2">
+              <StatusMenu status={statusOf(pipe)} disabled={!t.canWrite} onChange={(st) => setPipe((p) => ({ status: st, activity: addActivity(p, "status", `${statusById(statusOf(p)).label} → ${statusById(st).label}`) }))} />
+              <AssigneePicker value={pipe.assignee} disabled={!t.canWrite} known={Object.values(all).flatMap((p) => [p.assignee, p.createdBy, p.updatedBy]).filter(Boolean)} onChange={(id) => setPipe((p) => ({ assignee: id, activity: addActivity(p, "assignee", id ? t.name(id) : "unassigned") }))} />
+              <Btn size="sm" icon={MessageSquare} aria-expanded={showAct} onClick={() => setShowAct((v) => !v)}>Activity{(pipe.activity || []).length ? ` (${(pipe.activity || []).length})` : ""}</Btn>
+            </div>
+          </div>
+          <PresenceBar pid={pipe.id} />
+          {showAct && <ActivityPanel activity={pipe.activity || []} canWrite={t.canWrite} onNote={(text) => log("note", text)} />}
+        </div>
+        <ContextDrawer admin={t.admin} cfg={cfg} setCfg={setScoped} productInfo={productInfo} setProductName={setProductName} pipe={pipe} setPipe={setPipe} notify={notify} open={drawer} setOpen={setDrawer} caps={caps} guard={(label, fn) => (/design system|package/i.test(label) ? fn() : g(label, fn))} />
         <Stepper step={step} setStep={(n) => setPipe({ step: n })} hasResult={!!res} />
         <div>
           <h2 className="text-lg font-semibold">{STEPS[step - 1].label}</h2>
@@ -223,7 +250,7 @@ function PipelineView({ cfg: wcfg, setCfg, pipe, setPipe, all, caps, ai, notify,
         {step === 1 && <Step1 product={cfg.productNameRaw} productInfo={productInfo} setProductName={setProductName} ado={ado} setAdo={(a) => setPipe({ ado: a })} updAdo={(fn) => setPipe((p) => ({ ado: fn(p.ado) }))} engine={engine} setEngine={(e) => setPipe({ engine: e })} aiLabel={ai.label} run={run} busy={busy} progress={progress} stop={() => ctl.current?.abort()} err={err} upToDate={upToDate} assets={caps.assets} notify={notify} />}
         {step === 2 && res && <Step2 cfg={cfgView} ado={ado} res={res} setRes={setRes} notify={notify} onPdf={onPdf} pdfBusy={pdfBusy} history={history} onSuggest={onSuggest} suggestBusy={suggestBusy} aiLabel={ai.label} />}
         {step === 3 && res && <Step3 cfg={cfgView} res={res} setRes={setRes} onMatrices={onMatrices} mxBusy={mx.busy} mxProgress={mx.progress} aiLabel={ai.label} />}
-        {step === 4 && res && <Step4 cfg={cfgView} pipe={pipe} setPipe={setPipe} res={res} notify={notify} downloads={caps.downloads} mcp={caps.mcp} ai={ai} startBuild={startBuild} guard={g} proto={proto} startPrototype={startPrototype}
+        {step === 4 && res && <Step4 cfg={cfgView} pipe={pipe} setPipe={setPipe} res={res} notify={notify} downloads={caps.downloads} mcp={caps.mcp} ai={ai} startBuild={startBuild} guard={g} proto={proto} loadProto={loadProto} startPrototype={startPrototype}
           onSitemap={(groups, n) => setScoped({ ...cfg, journey: { groups, source: `Synced from target file · ${n} pages`, syncedAt: now() } })} />}
         {res && step > 1 && step < 4 && (
           <div className="flex justify-end gap-2 border-t border-line pt-4">
@@ -284,24 +311,35 @@ function ManualModal({ req, onDone, notify }) {
 }
 
 /* ---------------- App ---------------- */
+const LS_AI = "adoPipeline.ai";
+const readAi = () => { try { return JSON.parse(localStorage.getItem(LS_AI) || "null"); } catch { return null; } };
+const TRACKED = new Set();
+
 function App() {
   const [store, setStore] = useState(null);
   const [cfg, setCfgState] = useState(DEFAULT_CONFIG);
+  const [aiCfg, setAiState] = useState(() => readAi());
   const [pipelines, setPipelines] = useState({});
   const [loading, setLoading] = useState(true);
   const [openId, setOpenId] = useState(null);
+  const [view, setView] = useState(() => { try { return localStorage.getItem("adoPipeline.view") || "dashboard"; } catch { return "dashboard"; } });
+  const [filter, setFilter] = useState({});
   const [toast, setToast] = useState("");
   const [caps, setCaps] = useState({ sample: undefined, mcp: null, downloads: null, assets: null });
   const [manual, setManual] = useState([]);
   const [interrupt, setInterrupt] = useState(null);
+  const [askName, setAskName] = useState(false);
+  const t = useTeam();
   const cfgTimer = useRef(null);
   const latest = useRef({});
   const pending = useRef(new Map());
+  const dirty = useRef({});
   const timers = useRef({});
   const storeRef = useRef(null);
   const cfgRef = useRef(cfg); cfgRef.current = cfg;
-  const notify = (m) => { setToast(m); clearTimeout(notify.t); notify.t = setTimeout(() => setToast(""), 3200); };
+  const notify = (m) => { setToast(m); clearTimeout(notify.t); notify.t = setTimeout(() => setToast(""), 3600); };
   useSyncExternalStore(jobStore.subscribe, jobStore.snapshot);
+  useEffect(() => { try { localStorage.setItem("adoPipeline.view", view); } catch {} }, [view]);
 
   useEffect(() => {
     let unsub = () => {};
@@ -320,40 +358,65 @@ function App() {
       }, () => setLoading(false));
     })();
     const use = window.claude?.use;
-    if (!use) setCaps({ sample: null, mcp: null, downloads: null, assets: null });
+    if (!use) { setCaps({ sample: null, mcp: null, downloads: null, assets: null }); initTeam(null); }
     else {
       use("sample").then((x) => setCaps((c) => ({ ...c, sample: x || null }))).catch(() => setCaps((c) => ({ ...c, sample: null })));
       use("mcp").then((x) => setCaps((c) => ({ ...c, mcp: x || null }))).catch(() => {});
       use("downloads").then((x) => setCaps((c) => ({ ...c, downloads: x || null }))).catch(() => {});
       use("assets").then((x) => setCaps((c) => ({ ...c, assets: x || null }))).catch(() => {});
+      use("user").then((x) => initTeam(x || null)).catch(() => initTeam(null));
+      use("room").then((x) => initRoom(x || null)).catch(() => {});
     }
     const warn = (e) => { if (jobStore.running().length) { e.preventDefault(); e.returnValue = "A Figma page or prototype is still being built."; return e.returnValue; } };
     window.addEventListener("beforeunload", warn);
     return () => { unsub(); window.removeEventListener("beforeunload", warn); };
   }, []);
+  /* Without sign-in, ask once for a display name. */
+  useEffect(() => { if (t.ready && t.local && !t.me) setAskName(true); }, [t.ready]);
 
-  const setCfg = (c) => { setCfgState(c); clearTimeout(cfgTimer.current); cfgTimer.current = setTimeout(() => storeRef.current?.saveConfig(c).catch(() => notify("Couldn't save settings")), 900); };
+  /* Workspace settings (products) are shared; only admins write them. */
+  const setCfg = (c) => {
+    setCfgState(c); clearTimeout(cfgTimer.current);
+    if (!team.admin) return;
+    cfgTimer.current = setTimeout(() => storeRef.current?.saveConfig(c).catch(() => notify("Couldn't save the product settings (admins only).")), 900);
+  };
+  /* The AI provider is personal: kept in this browser, like the API keys. */
+  const ai0 = aiCfg || cfg.ai || DEFAULT_CONFIG.ai;
+  const setAi = (a) => { setAiState(a); try { localStorage.setItem(LS_AI, JSON.stringify(a)); } catch {} };
 
-  /* One store for all pipelines: views and background jobs write through here. */
+  /* One store for all pipelines: views and background jobs write through here. Only changed fields are sent. */
   const scheduleSave = (id) => {
     const seq = (pending.current.get(id) || 0) + 1;
     pending.current.set(id, seq);
     clearTimeout(timers.current[id]);
     timers.current[id] = setTimeout(async () => {
       const doc = latest.current[id];
-      if (doc) { try { await storeRef.current?.savePipeline(doc); } catch { notify("Couldn't save. Your changes stay on screen; check your connection."); } }
+      const keys = [...(dirty.current[id] || [])]; dirty.current[id] = new Set();
+      if (doc) { try { await storeRef.current?.savePipeline(doc, keys.length ? [...keys, "updatedAt", "updatedBy"] : null); } catch { notify("Couldn't save. Your changes stay on screen; check your connection."); } }
       if (pending.current.get(id) === seq) pending.current.delete(id);
     }, 800);
   };
   const updatePipe = (id, patch) => {
     const p = latest.current[id]; if (!p) return;
-    const pp = typeof patch === "function" ? patch(p) : patch;
-    const next = { ...latest.current, [id]: { ...p, ...pp, updatedAt: now() } };
+    let pp = typeof patch === "function" ? patch(p) : patch;
+    const before = (p.figmaRuns || []).length;
+    if (pp.figmaRuns && pp.figmaRuns.length > before) {
+      const run = pp.figmaRuns[pp.figmaRuns.length - 1];
+      if (run?.ok) pp = { ...pp, activity: addActivity({ ...p, ...pp }, "figma", run.page || ""), status: ["draft", "po_review", "approved"].includes(statusOf(p)) ? "in_design" : p.status };
+    }
+    const next = { ...latest.current, [id]: { ...p, ...pp, updatedAt: now(), updatedBy: team.me || p.updatedBy || null } };
     latest.current = next;
     setPipelines(next);
+    const d = dirty.current[id] || (dirty.current[id] = new Set());
+    Object.keys(pp).forEach((k) => d.add(k));
     scheduleSave(id);
   };
-  const create = (over) => { const p = newPipeline(over); latest.current = { ...latest.current, [p.id]: p }; setPipelines(latest.current); storeRef.current?.savePipeline(p).catch(() => {}); setOpenId(p.id); };
+  const create = (over = {}) => {
+    const p = newPipeline({ createdBy: team.me || null, assignee: team.me || null, ...over });
+    p.activity = addActivity(p, "created", "");
+    latest.current = { ...latest.current, [p.id]: p }; setPipelines(latest.current);
+    storeRef.current?.savePipeline(p).catch(() => {}); setOpenId(p.id);
+  };
   const remove = (id) => {
     jobStore.running().filter((j) => j.pipelineId === id).forEach((j) => jobStore.stop(j.id));
     pending.current.delete(id); clearTimeout(timers.current[id]);
@@ -363,73 +426,164 @@ function App() {
   };
 
   const manualBridge = (req) => new Promise((resolve, reject) => setManual((q) => [...q, { ...req, resolve, reject }]));
-  const ai = useMemo(() => makeAI({ aiCfg: cfg.ai, caps, manualBridge }), [cfg.ai, caps]);
+  const ai = useMemo(() => makeAI({ aiCfg: ai0, caps, manualBridge }), [ai0, caps]);
 
   const guard = (pid, label, proceed) => {
     const job = jobStore.running().find((j) => j.pipelineId === pid && (j.kind || "figma") === "figma");
     if (!job) { proceed(); return; }
     setInterrupt({ label, proceed, job });
   };
+  const saveSnapFor = (pid) => (id, data) => storeRef.current?.saveDoc("snaps", `${pid}__${id}`, data);
+  const scoped = (pid) => { const sc = scopedConfig({ ...cfgRef.current, ai: ai0 }, latest.current[pid]); return { ...sc, dsName: dsLabel(sc) }; };
   const startBuild = (pid, { resume, autoDraftName }) => {
     if (isRunning(pid, "figma")) return;
     updatePipe(pid, { autoDraftName });
-    const sc = scopedConfig(cfgRef.current, latest.current[pid]);
-    const cfgNow = { ...sc, dsName: dsLabel(sc) };
+    const cfgNow = scoped(pid);
     runFigmaBuild({
       pipelineId: pid, resume, cfg: cfgNow, ai, mcp: caps.mcp, notify,
-      getPipe: (id) => latest.current[id], updatePipe,
-      compileBrief: () => compile(cfgNow, latest.current[pid], latest.current[pid].res, { figma: true, ds: false, prd: true, stories: true, validation: true, drift: true, board: false }, "Figma agent"),
+      getPipe: (id) => latest.current[id], updatePipe, saveSnap: saveSnapFor(pid),
+      compileBrief: () => compile(cfgNow, latest.current[pid], latest.current[pid].res, { figma: true, ds: false, dsDigest: true, prd: true, stories: true, validation: true, drift: true, board: false }, "Figma agent"),
     });
   };
 
-  /* Navigable prototype built from the generated Figma page. Kept in memory (it holds the screen images). */
+  /* Navigable prototype of the Figma result: the saved screen code is replayed as HTML (no Figma calls),
+     one short AI call wires the navigation. Saved per pipeline. */
   const [protos, setProtos] = useState({});
-  const startPrototype = (pid, quality) => {
+  const protosRef = useRef(protos); protosRef.current = protos;
+  const loadProto = async (pid) => {
+    if (protosRef.current[pid] !== undefined) return;
+    let d = null; try { d = await storeRef.current?.getDoc("prototypes", pid); } catch {}
+    setProtos((p) => (p[pid] !== undefined ? p : { ...p, [pid]: d?.html ? d : null }));
+  };
+  const startPrototype = (pid, opts = {}) => {
     if (isRunning(pid, "prototype")) return;
-    const pipe = latest.current[pid]; if (!pipe?.res) return;
-    const sc = scopedConfig(cfgRef.current, pipe);
-    const cfgNow = { ...sc, dsName: dsLabel(sc) };
-    runFigmaPrototype({
-      pipelineId: pid, getPipe: (id) => latest.current[id], ai, mcp: caps.mcp, notify, quality,
-      compileBrief: () => compile(cfgNow, latest.current[pid], latest.current[pid].res, { figma: false, ds: false, prd: false, stories: true, validation: true, drift: false, board: false }, "Prototype agent"),
-      onDone: (proto) => setProtos((p) => ({ ...p, [pid]: proto })),
-    });
+    const pipe = latest.current[pid]; const build0 = pipe?.figmaBuild; if (!build0?.plan) return;
+    const sc = scoped(pid);
+    const steps = [...(opts.capture ? [{ label: "Record the screens from the Figma page", status: "run" }] : []), { label: "Rebuild the screens as HTML", status: opts.capture ? "todo" : "run" }, { label: "Wire the navigation", status: "todo" }, { label: "Build the file", status: "todo" }];
+    const job = jobStore.start({ id: "proto-" + pid + "-" + Date.now(), kind: "prototype", pipelineId: pid, title: pipe.ado?.id || pipe.ado?.title || "Prototype", steps });
+    const o = opts.capture ? 1 : 0;
+    (async () => {
+      try {
+        if (opts.capture) {
+          const fk = parseFigmaUrl(pipe.figmaUrl)?.fileKey;
+          if (!caps.mcp || !fk) throw new Error("Figma isn't connected in this view.");
+          const st = await recordSnaps({
+            mcp: caps.mcp, fileKey: fk, pageId: build0.pageId, mainId: build0.mainId, first: null, list: null,
+            state: { ...build0, snapParts: [], snapKnown: { s: [], c: [] }, snapIds: [] },
+            save: (patch) => updatePipe(pid, (p) => ({ figmaBuild: { ...p.figmaBuild, ...patch } })),
+            saveSnap: saveSnapFor(pid), onNote: (t) => jobStore.step(job.id, 0, { note: t }),
+          });
+          jobStore.step(job.id, 0, { status: "ok", note: `${(st.snapIds || []).length} screens recorded` });
+          jobStore.step(job.id, 1, { status: "run" });
+        }
+        const build = latest.current[pid]?.figmaBuild || build0;
+        const theme = protoTheme(pipe.figmaContext || {});
+        const productName = sc.productName || "Product";
+        /* Screens recorded from Figma are exact; any others are redrawn from the saved code or the plan. */
+        let parts = [];
+        if (build.snapParts?.length) parts = await Promise.all(build.snapParts.map((id) => storeRef.current?.getDoc("snaps", `${pid}__${id}`).catch(() => null)));
+        const snaps = mergeSnaps(parts, build.plan);
+        const exact = snaps.screens.map((x) => renderSnap(x, snaps.chrome));
+        const have = new Set(exact.map((x) => x.id));
+        let rest = { screens: [], notes: [] };
+        if ((build.plan || []).some((p) => !have.has(p.id))) { rest = await renderScreens({ build, theme, productName }); rest.screens = rest.screens.filter((x) => !have.has(x.id)); }
+        const order = (build.plan || []).map((p) => p.id);
+        const screens = [...exact, ...rest.screens].sort((a, b) => (order.indexOf(a.id) + 1 || 999) - (order.indexOf(b.id) + 1 || 999));
+        const source = exact.length && !rest.screens.length ? "exact copy of the Figma screens" : exact.length ? `${exact.length} screens copied from Figma, ${rest.screens.length} redrawn` : rest.source;
+        jobStore.step(job.id, o, { status: "ok", note: `${screens.length} screens · ${screens.reduce((a, x) => a + x.hotspots.length, 0)} clickable elements · ${source}` });
+        jobStore.step(job.id, o + 1, { status: "run", note: `Asking ${ai.label}…` });
+        let wiring = null, by = ai.label;
+        try { const j = parseJSONLoose(await ai.ask(wirePrompt(screens, build.plan), { title: "Wire the prototype's navigation", tier: "default" })); if (Array.isArray(j?.links)) wiring = j; } catch (e) { if (e?.code === "cancelled") throw e; }
+        if (!wiring) { wiring = { start: screens[0]?.id, links: heuristicLinks(screens) }; by = "rules"; }
+        const ids = new Set(screens.map((x) => x.id));
+        const links = wiring.links.filter((l) => ids.has(l.s) && Number.isInteger(l.h) && (l.back || l.toast || ids.has(l.to)));
+        jobStore.step(job.id, o + 1, { status: "ok", note: `${links.length} interactions · ${by}` });
+        const title = (build.pageName || pipe.ado?.title || "Prototype").replace(/^[↳\s]+/, "").replace(/\s*\[Draft\]\s*$/, "");
+        const fonts = [...new Set(exact.flatMap((x) => x.fonts || []))];
+        const html = prototypeFile({ title, productName, figmaPage: build.pageName, screens, links, start: ids.has(wiring.start) ? wiring.start : screens[0]?.id, theme, source, sprite: spriteOf(snaps.svg), fonts });
+        const doc = { html, screens: screens.length, exact: exact.length, links: links.length, by, source, notes: rest.notes, at: now() };
+        jobStore.step(job.id, o + 2, { status: "ok" }); jobStore.update(job.id, { status: "done" });
+        setProtos((p) => ({ ...p, [pid]: doc }));
+        updatePipe(pid, (p) => ({ activity: addActivity(p, "prototype", `${screens.length} screens`) }));
+        storeRef.current?.saveDoc("prototypes", pid, doc)?.catch?.(() => {});
+        notify("Prototype ready");
+      } catch (e) {
+        jobStore.update(job.id, { status: e?.code === "cancelled" ? "stopped" : "error", error: `Couldn't build the prototype: ${e?.code ? figmaErrorText(e) : e?.message || e}` });
+      }
+    })();
+  };
+
+  /* Backup and move: one JSON file with every pipeline and the product settings. */
+  const onExport = async () => {
+    const data = { app: "ado-figma-spec-pipeline", version: 2, exportedAt: now(), config: { ...cfg, ai: undefined }, pipelines: latest.current };
+    await saveFile(caps.downloads, `spec-pipeline-workspace-${now().slice(0, 10)}.json`, JSON.stringify(data, null, 1), notify);
+  };
+  const onImport = async (file) => {
+    let data; try { data = JSON.parse(await file.text()); } catch { notify("That file isn't a workspace export."); return; }
+    if (!data?.pipelines || typeof data.pipelines !== "object") { notify("That file has no pipelines."); return; }
+    let n = 0;
+    for (const p of Object.values(data.pipelines)) {
+      if (!p?.id) continue;
+      const cur = latest.current[p.id];
+      if (cur && String(cur.updatedAt) >= String(p.updatedAt)) continue;
+      const doc = { ...p, activity: addActivity(p, "imported", "") };
+      latest.current = { ...latest.current, [p.id]: doc };
+      try { await storeRef.current?.savePipeline(doc); n++; } catch {}
+    }
+    setPipelines(latest.current);
+    if (data.config && team.admin) {
+      const c = migrateConfig(data.config);
+      const merged = { ...cfg, products: { ...(c.products || {}), ...(cfg.products || {}) }, legacy: cfg.legacy || c.legacy };
+      setCfg(merged);
+    }
+    notify(`Imported ${n} pipeline${n === 1 ? "" : "s"}${data.config && team.admin ? " and the product settings" : ""}.`);
   };
 
   const open = pipelines[openId];
   const openPipe = (id) => { setOpenId(id); updatePipe(id, { step: 4 }); };
+  const counts = { pipelines: Object.keys(pipelines).length, products: Object.keys(cfg.products || {}).length };
+  const viewUpdate = (patch) => { updatePipe(openId, patch); pushPresence({ pid: openId, editingAt: Date.now() }); };
   return (
     <div className="min-h-full">
       <header className="sticky z-30 border-b border-line bg-surface/95 backdrop-blur" style={{ top: "env(safe-area-inset-top,0px)" }}>
-        <div className="mx-auto flex max-w-7xl flex-wrap items-center justify-between gap-3 px-gutter py-3">
+        <div className="flex flex-wrap items-center justify-between gap-3 px-gutter py-3">
           <button className="flex min-w-0 items-center gap-3 text-left" onClick={() => setOpenId(null)}>
             <span className="flex h-8 w-8 shrink-0 items-center justify-center rounded-md bg-accent text-accent-fg"><GitCompare size={17} aria-hidden="true" /></span>
-            <h1 className="truncate text-[15px] font-semibold">ADO → Figma Spec Pipeline</h1>
+            <span className="min-w-0"><h1 className="truncate text-[15px] font-semibold leading-tight">ADO → Figma Spec Pipeline</h1><span className="block text-[11px] text-muted">Team workspace</span></span>
           </button>
           <div className="flex flex-wrap items-center gap-2">
             <JobIndicator pipelines={pipelines} onOpen={openPipe} />
-            {openId && (<>
-              <Btn size="sm" icon={ArrowLeft} onClick={() => setOpenId(null)}>All pipelines</Btn>
-              <Btn size="sm" icon={Plus} onClick={() => create({ productName: open ? pipeContext(open, cfg).productName : "" })}>Clear / New ADO</Btn>
-            </>)}
+            {openId && <Btn size="sm" icon={Plus} onClick={() => create({ productName: open ? pipeContext(open, cfg).productName : "" })}>New ADO</Btn>}
+            <button onClick={() => { setOpenId(null); setView("workspace"); }} aria-label="Your profile and workspace" className="rounded-full">{t.me ? <Avatar id={t.me} size={28} /> : <span className="text-xs text-muted">Set name</span>}</button>
           </div>
         </div>
       </header>
-      {openId && open ? (
-        <>
-          <nav aria-label="Breadcrumb" className="mx-auto flex max-w-7xl min-w-0 items-center gap-1.5 px-gutter pt-3 text-sm">
-            <button onClick={() => setOpenId(null)} className="flex items-center gap-1 text-muted hover:text-fg"><ArrowLeft size={14} />All spec pipelines</button>
-            <span className="text-muted">/</span>
-            <span className="truncate font-medium">{open.ado.id || open.ado.title || "New ADO"}</span>
-            {isRunning(open.id, "figma") && <span className="ml-2 inline-flex items-center gap-1 text-xs text-accent-strong"><Figma size={12} />Figma build running</span>}
-          </nav>
-          <PipelineView key={openId} cfg={cfg} setCfg={setCfg} pipe={open} setPipe={(patch) => updatePipe(openId, patch)} all={pipelines} caps={caps} ai={ai} notify={notify} guard={guard} startBuild={startBuild} proto={protos[openId]} startPrototype={startPrototype} />
-        </>
-      ) : (
-        <Home cfg={cfg} pipelines={pipelines} loading={loading} storeMode={store?.mode} onOpen={setOpenId} onNew={() => create()}
-          onDuplicate={(p) => create({ ...JSON.parse(JSON.stringify(p)), example: false, ado: { ...p.ado, title: `${p.ado?.title || "Untitled"} (copy)` }, figmaRuns: [], figmaBuild: null })}
-          onDelete={remove} />
-      )}
+      <div className="flex flex-col lg:flex-row">
+        <Sidebar view={openId ? "pipelines" : view} setView={(v) => { setOpenId(null); setView(v); }} counts={counts} />
+        {openId && open ? (
+          <div className="min-w-0 flex-1">
+            <nav aria-label="Breadcrumb" className="mx-auto flex max-w-7xl min-w-0 items-center gap-1.5 px-gutter pt-3 text-sm">
+              <button onClick={() => setOpenId(null)} className="flex items-center gap-1 text-muted hover:text-fg"><ArrowLeft size={14} />Spec pipelines</button>
+              <span className="text-muted">/</span>
+              <span className="truncate font-medium">{open.ado.id || open.ado.title || "New ADO"}</span>
+              {isRunning(open.id, "figma") && <span className="ml-2 inline-flex items-center gap-1 text-xs text-accent-strong"><Figma size={12} />Figma build running</span>}
+            </nav>
+            <PipelineView key={openId} cfg={{ ...cfg, ai: ai0 }} setCfg={(c) => setCfg({ ...c, ai: cfgRef.current.ai })} setAi={setAi} pipe={open} setPipe={viewUpdate} all={pipelines} caps={caps} ai={ai} notify={notify} guard={guard} startBuild={startBuild} proto={protos[openId]} loadProto={loadProto} startPrototype={startPrototype} />
+          </div>
+        ) : view === "dashboard" ? (
+          <Dashboard cfg={cfg} pipelines={pipelines} onOpen={setOpenId} onNew={() => create()} setView={setView} setFilter={setFilter} />
+        ) : view === "products" ? (
+          <Products cfg={cfg} pipelines={pipelines} onOpen={setOpenId} onNew={(o) => create(o)} setView={setView} setFilter={setFilter} />
+        ) : view === "workspace" ? (
+          <Workspace cfg={cfg} pipelines={pipelines} storeMode={store?.mode} onExport={onExport} onImport={onImport} onName={() => setAskName(true)}
+            aiCard={<div className="max-w-3xl"><AICard cfg={{ ...cfg, ai: ai0 }} setCfg={(c) => setAi(c.ai)} caps={caps} /></div>} />
+        ) : (
+          <PipelinesList cfg={cfg} pipelines={pipelines} loading={loading} storeMode={store?.mode} onOpen={setOpenId} onNew={() => create()} filter={filter} setFilter={setFilter}
+            onDuplicate={(p) => create({ ...JSON.parse(JSON.stringify(p)), example: false, ado: { ...p.ado, title: `${p.ado?.title || "Untitled"} (copy)` }, figmaRuns: [], figmaBuild: null, activity: [], status: "draft" })}
+            onDelete={remove} />
+        )}
+      </div>
+      {askName && <NameDialog onClose={() => setAskName(false)} />}
       {manual[0] && <ManualModal key={manual[0].prompt.length + (manual[0].title || "")} req={manual[0]} notify={notify} onDone={(answer) => { const r = manual[0]; setManual((q) => q.slice(1)); answer ? r.resolve(answer) : r.reject(Object.assign(new Error("Cancelled."), { code: "cancelled" })); }} />}
       {interrupt && (
         <Modal title="Stop the Figma build?" onClose={() => setInterrupt(null)}

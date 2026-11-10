@@ -1,5 +1,22 @@
 # Changelog
 
+## 1.3.0 · 2026-11-10
+
+### Added
+- Team workspace: dashboard, pipeline list with filters, status, assignee, activity log, presence, admin-only product settings, per-person AI settings, workspace export/import.
+- References panel: source of truth (also view-only files) + uploaded design system + target file, with Sync; learned screen structure (header, side navigation, breadcrumb, title, modals, side panels).
+- Icons: buttons get icons matching their action, from the file's icon components or SVGs in the design-system package.
+- Prototype that mirrors the generated Figma screens (recorded during generation, no extra Figma calls); "Record from Figma and build" for older pages.
+- Desktop screens are 1080 px tall by default and grow only when content needs it.
+
+### Fixed
+- Screens missing header or side navigation; modals and side panels now drawn over the screen on a scrim.
+- Reference reading: screens found by content in any naming, page ids, read errors shown.
+- Review notes section is generated in Figma.
+- Secondary buttons tinted / showing placeholder icons (state and sample icons copied from the reference instance).
+- Figma call-limit errors when building the prototype.
+
+
 ## 1.2.0 · 2026-11-06
 
 ### Added

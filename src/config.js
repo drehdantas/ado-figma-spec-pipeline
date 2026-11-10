@@ -95,5 +95,12 @@ export function activeDS(cfg) {
   const alt = cfg.slots.find((s) => s.packages?.length);
   return { slot, files: alt ? alt.packages.flatMap((p) => p.files) : [], fallback: alt?.name || null, rule: slot?.rule || "hybrid", name: slot?.name || "Design system" };
 }
+/* SVG icons that came in the design-system package, by file name (without folders and extension). */
+export function dsSvgs(cfg) {
+  const out = {};
+  try { for (const f of activeDS(cfg).files) if (/\.svg$/i.test(f.path) && typeof f.content === "string" && /<svg/i.test(f.content)) { const n = f.path.split("/").pop().replace(/\.svg$/i, ""); if (!out[n]) out[n] = f.content; } } catch {}
+  return out;
+}
+export const isSvgFile = (f) => /\.svg$/i.test(f?.path || "");
 export const dsLabel = (cfg) => { const d = activeDS(cfg); return `${d.name} (${RULES[d.rule]?.label || d.rule})`; };
 export const allNodes = (cfg) => cfg.journey.groups.flatMap((g) => g.nodes);

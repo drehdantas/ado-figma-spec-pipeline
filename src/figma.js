@@ -3,7 +3,8 @@
 export function parseFigmaUrl(url) {
   const m = String(url || "").match(/figma\.com\/(?:design|file|board|slides|proto)\/([A-Za-z0-9]+)(?:\/branch\/([A-Za-z0-9]+))?/);
   if (!m) return null;
-  return { fileKey: m[2] || m[1], mainKey: m[1], branch: !!m[2] };
+  const node = (String(url).match(/[?&]node-id=([0-9]+[-:][0-9]+)/) || [])[1];
+  return { fileKey: m[2] || m[1], mainKey: m[1], branch: !!m[2], nodeId: node ? node.replace("-", ":") : null };
 }
 
 const ERR = {
@@ -48,13 +49,25 @@ async function useFigmaInput(mcp, fileKey, code, description) {
   return input;
 }
 
+/* The result can arrive as payload, structured content or text content depending on the runtime: accept all. */
+export function figmaPayload(res) {
+  let out = res?.payload ?? res?.structuredContent ?? res?.result;
+  if (out === undefined && Array.isArray(res?.content)) out = res.content.filter((c) => c.type === "text").map((c) => c.text).join("");
+  if (out && typeof out === "object" && !Array.isArray(out) && Array.isArray(out.content) && out.content[0]?.type === "text" && Object.keys(out).length <= 3) out = out.content.map((c) => c.text || "").join("");
+  if (typeof out === "string") {
+    const t = out.trim();
+    try { out = JSON.parse(t); } catch {
+      const m = t.match(/[\[{][\s\S]*[\]}]/); if (m) { try { out = JSON.parse(m[0]); } catch {} }
+    }
+  }
+  if (res?.isError) throw Object.assign(new Error(typeof out === "string" ? out : "Figma returned an error."), { code: "tool_error" });
+  return out;
+}
 export async function runInFigma(mcp, fileKey, code, description) {
   if (String(code).length > 50000) throw Object.assign(new Error(`The Figma code is ${String(code).length.toLocaleString()} characters; Figma accepts up to 50,000.`), { code: "too_big" });
   const input = await useFigmaInput(mcp, fileKey, code, description);
   const res = await mcp.callTool("Figma", "use_figma", input, { cache: false });
-  let out = res.payload;
-  if (typeof out === "string") { try { out = JSON.parse(out); } catch {} }
-  return out;
+  return figmaPayload(res);
 }
 
 /* ---------- Page sync ---------- */

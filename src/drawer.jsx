@@ -68,7 +68,7 @@ function SlotsCard({ cfg, setCfg, notify, downloads, guard }) {
                     <ul className="flex flex-col divide-y divide-line rounded border border-line text-xs">
                       {slot.packages.map((p) => (
                         <li key={p.id} className="flex items-center justify-between gap-2 px-2 py-1.5">
-                          <span className="min-w-0"><span className="block truncate font-medium">{p.name}</span><span className="text-[11px] text-muted">{p.files.length} files · {fmtDate(p.updatedAt)}</span></span>
+                          <span className="min-w-0"><span className="block truncate font-medium">{p.name}</span><span className="text-[11px] text-muted">{p.files.filter((f) => !/\.svg$/i.test(f.path)).length} files{p.files.some((f) => /\.svg$/i.test(f.path)) ? ` · ${p.files.filter((f) => /\.svg$/i.test(f.path)).length} SVG icons` : ""} · {fmtDate(p.updatedAt)}</span></span>
                           <Btn size="sm" variant="ghost" icon={Trash2} aria-label={`Remove ${p.name}`} onClick={() => setDel({ kind: "pkg", slot, pkg: p })} />
                         </li>
                       ))}
@@ -86,9 +86,10 @@ function SlotsCard({ cfg, setCfg, notify, downloads, guard }) {
         })}
       </div>
       {ds.fallback && <p role="status" className="flex gap-1.5 rounded-md bg-warn-bg px-2 py-1.5 text-xs text-warn-fg"><AlertTriangle size={14} className="mt-px shrink-0" />“{ds.name}” has no package yet. Analysis and prompts use the files of “{ds.fallback}”, with this slot's rule, until you upload one.</p>}
-      <details className="text-xs"><summary className="cursor-pointer text-muted hover:text-fg">Files in use ({ds.files.length})</summary>
+      <p className="text-[11px] text-muted">{ds.files.some((f) => /\.svg$/i.test(f.path)) ? `${ds.files.filter((f) => /\.svg$/i.test(f.path)).length} SVG icons from the package are used in Figma when the file's own icon library doesn't have the icon.` : "No SVG icons in the package: icons come only from the Figma file's icon components. Packages uploaded before icons were supported need to be uploaded again to bring their SVGs."}</p>
+      <details className="text-xs"><summary className="cursor-pointer text-muted hover:text-fg">Files in use ({ds.files.filter((f) => !/\.svg$/i.test(f.path)).length})</summary>
         <ul className="mt-1 flex flex-col divide-y divide-line rounded-md border border-line bg-surface">
-          {ds.files.map((f, i) => <li key={f.path + i} className="flex items-center justify-between gap-2 px-2 py-1"><button className="min-w-0 truncate text-left font-mono text-[11px] hover:text-accent hover:underline" onClick={() => setPreview(f)}>{f.path}</button><span className="shrink-0 text-[11px] text-muted">{kindOf(f.path)}</span></li>)}
+          {ds.files.filter((f) => !/\.svg$/i.test(f.path)).map((f, i) => <li key={f.path + i} className="flex items-center justify-between gap-2 px-2 py-1"><button className="min-w-0 truncate text-left font-mono text-[11px] hover:text-accent hover:underline" onClick={() => setPreview(f)}>{f.path}</button><span className="shrink-0 text-[11px] text-muted">{kindOf(f.path)}</span></li>)}
         </ul>
       </details>
       {preview && <Modal wide title={preview.path} onClose={() => setPreview(null)}><pre className="whitespace-pre-wrap rounded-md bg-surface-2 p-3 font-mono text-xs leading-relaxed">{preview.content}</pre></Modal>}
@@ -131,7 +132,7 @@ function UploadDialog({ slot, onClose, onFiles }) {
     try {
       const buf = await f.arrayBuffer();
       const files = /\.zip$/i.test(f.name) ? await zipToFiles(buf) : [{ path: f.name, content: new TextDecoder().decode(buf) }];
-      if (!files.length) { setErr("No .md or .json files found in that package."); return; }
+      if (!files.length) { setErr("No .md, .json or .svg files found in that package."); return; }
       onFiles(files, f.name);
     } catch (e) { setErr("Couldn't read that file: " + (e.message || e)); }
   };
@@ -142,7 +143,7 @@ function UploadDialog({ slot, onClose, onFiles }) {
           className={`flex cursor-pointer flex-col items-center gap-2 rounded-lg border-2 border-dashed p-6 text-center ${drag ? "border-accent bg-accent-soft" : "border-line bg-bg"}`}>
           <Upload size={20} aria-hidden="true" className="text-muted" />
           <span className="text-sm font-medium">Drop a file or click to choose</span>
-          <span className="text-xs text-muted">.zip with Markdown / JSON files (tokens, components, rules), or a single .md / .json. Packages add up: existing ones stay.</span>
+          <span className="text-xs text-muted">.zip with Markdown / JSON files (tokens, components, rules) and SVG icons, or a single .md / .json. Packages add up: existing ones stay.</span>
           <input type="file" className="sr-only" accept=".zip,.md,.json,.txt" onChange={(e) => e.target.files[0] && onFile(e.target.files[0])} />
         </label>
         <Field label="…or paste design rules (Markdown)"><textarea id="pkgText" className="h-40 w-full rounded-md border border-line bg-surface p-2 font-mono text-xs" value={text} onChange={(e) => setText(e.target.value)} /></Field>
@@ -168,7 +169,7 @@ export function ProductField({ value, info, onCommit, id = "productName" }) {
   );
 }
 
-function AICard({ cfg, setCfg, caps }) {
+export function AICard({ cfg, setCfg, caps }) {
   const ai = cfg.ai;
   const [keys, setKeys] = useState(() => ({ openai: getKey("openai"), anthropic: getKey("anthropic"), gemini: getKey("gemini") }));
   const resolved = resolveProvider(ai, caps);
@@ -181,7 +182,7 @@ function AICard({ cfg, setCfg, caps }) {
   );
   return (
     <div className="flex min-w-0 flex-col gap-3 rounded-lg border border-line bg-bg p-4">
-      <p className="flex items-center gap-1.5 text-[11px] font-semibold uppercase tracking-wider text-muted"><Cpu size={12} />AI provider · all pipelines</p>
+      <p className="flex items-center gap-1.5 text-[11px] font-semibold uppercase tracking-wider text-muted"><Cpu size={12} />Your AI provider · all pipelines, this browser</p>
       <Field label="AI agent for analysis, suggestions and design">
         <select id="aiProvider" className={inputCls} value={p} onChange={(e) => setAI({ provider: e.target.value })}>
           <option value="auto">Automatic (best available)</option>
@@ -203,7 +204,7 @@ function AICard({ cfg, setCfg, caps }) {
   );
 }
 
-export function ContextDrawer({ cfg, setCfg, pipe, setPipe, notify, open, setOpen, caps, guard, productInfo, setProductName }) {
+export function ContextDrawer({ cfg, setCfg, pipe, setPipe, notify, open, setOpen, caps, guard, productInfo, setProductName, admin = true }) {
   const [preview, setPreview] = useState(null);
   const [replaceTpl, setReplaceTpl] = useState(false);
   const [sync, setSync] = useState({ busy: null, err: "" });
@@ -225,8 +226,8 @@ export function ContextDrawer({ cfg, setCfg, pipe, setPipe, notify, open, setOpe
   };
   const ds = activeDS(cfg);
   return (
-    <section className="border-b border-line bg-surface">
-      <div className="mx-auto max-w-7xl px-gutter">
+    <section aria-label="Configuration and context" className="rounded-lg border border-line bg-surface">
+      <div className="px-4">
         <button onClick={() => setOpen(!open)} aria-expanded={open} className="flex w-full items-center justify-between gap-3 py-2.5 text-left">
           <span className="flex items-center gap-2 text-sm font-semibold"><Settings2 size={16} aria-hidden="true" />Configuration & context</span>
           <span className="flex min-w-0 items-center gap-2 text-xs text-muted">
@@ -238,9 +239,9 @@ export function ContextDrawer({ cfg, setCfg, pipe, setPipe, notify, open, setOpe
           <div className="grid gap-4 pb-4 lg:grid-cols-2">
             <div className="flex min-w-0 flex-col gap-2 rounded-lg border border-accent/40 bg-accent-soft/40 p-4 lg:col-span-2">
               <div className="max-w-xl"><ProductField value={cfg.productNameRaw} info={productInfo} onCommit={setProductName} /></div>
+              {!admin && cfg.productKey && <p className="rounded-md bg-surface px-2 py-1.5 text-xs text-muted-strong">You can pick an existing product. Its PRD template, design systems and style guide are managed by admins, so changes to them here are not saved.</p>}
               <p className="text-xs text-muted-strong">Every pipeline has its own context. <span className="font-semibold">Shared by product:</span> PRD template, design-system slots and matrix style guide. <span className="font-semibold">Always this pipeline's own:</span> Figma target, source of truth, journey sitemap and node. Only pipelines with the same product name are used as references for suggestions.</p>
             </div>
-            <AICard cfg={cfg} setCfg={setCfg} caps={caps} />
             <div className="flex min-w-0 flex-col gap-3 rounded-lg border border-line bg-bg p-4">
               <div className="flex items-start justify-between gap-2">
                 <div className="min-w-0">
