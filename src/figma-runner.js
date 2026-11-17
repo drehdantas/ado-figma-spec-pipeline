@@ -4,6 +4,7 @@ import { jobStore } from "./jobs.js";
 import { runInFigma, figmaErrorText, stripFences, parseFigmaUrl } from "./figma.js";
 import { contextForPrompt, resolveIcons } from "./figma-context.js";
 import { captureCode } from "./proto-snap.js";
+import { mdForPrompt } from "./mdeditor.jsx";
 import { dsSvgs } from "./config.js";
 import { draftIdOf, createPageCode, screensCode, finalizeMainCode, docsCalls, cardTexts, docsData, planPrompt, batchPrompt, CODE_LIMIT } from "./figma-build.js";
 import { parseJSONLoose } from "./engine.js";
@@ -42,7 +43,7 @@ export async function recordSnaps({ mcp, fileKey, pageId, mainId, first, list, s
   return state;
 }
 
-export async function runFigmaBuild({ pipelineId, getPipe, updatePipe, cfg, ai, mcp, compileBrief, notify, resume, saveSnap }) {
+export async function runFigmaBuild({ pipelineId, getPipe, updatePipe, cfg, ai, mcp, compileBrief, notify, resume, saveSnap, notesImages }) {
   const pipe0 = getPipe(pipelineId);
   const target = parseFigmaUrl(pipe0.figmaUrl);
   const ctx = { ...pipe0.figmaContext, dsSvgs: dsSvgs(cfg) };
@@ -54,7 +55,7 @@ export async function runFigmaBuild({ pipelineId, getPipe, updatePipe, cfg, ai, 
   const save = (patch) => { state = { ...state, ...patch }; updatePipe(pipelineId, { figmaBuild: state }); };
   const nb = (plan) => Math.ceil(plan.length / BATCH);
   const mk = (plan) => [
-    { label: "Plan the screens from the brief and the file", status: state.plan ? "ok" : "todo", note: state.plan ? `${state.plan.length} screens` : "" },
+    { label: pipe0.ado?.designerNotes?.trim() ? "Plan the screens from the brief, the designer comments and the file" : "Plan the screens from the brief and the file", status: state.plan ? "ok" : "todo", note: state.plan ? `${state.plan.length} screens` : "" },
     { label: `Create page “${pageName}” with Feature Card`, status: state.pageId ? "ok" : "todo" },
     ...Array.from({ length: plan ? nb(plan) : 1 }, (_, b) => ({ label: plan ? `Screens ${draftId}.${b * BATCH + 1}–${Math.min(plan.length, (b + 1) * BATCH)}` : "Screens", status: b < state.done ? "ok" : "todo" })),
     { label: state.docs && !state.review ? "Review notes section" : "Handoff, Review notes and Comparison sections", status: state.docs && state.review ? "ok" : "todo" },
@@ -63,12 +64,16 @@ export async function runFigmaBuild({ pipelineId, getPipe, updatePipe, cfg, ai, 
   jobStore.update(job.id, { steps: mk(state.plan) });
   const brief = compileBrief();
   const ctxText = contextForPrompt(ctx);
+  /* Designer comments lead the plan and every batch of screens, with their images when the AI takes images. */
+  const notes = mdForPrompt(pipe0.ado?.designerNotes || "");
+  let nImgs = [];
+  if (notes.trim() && notesImages) { try { nImgs = await notesImages(); } catch { nImgs = []; } }
   let i = 0;
   try {
     if (!state.plan) {
       set(0, { status: "run", note: "Thinking…" });
       let plan;
-      try { plan = parseJSONLoose(await ai.ask(planPrompt(brief, ctxText, draftId), { title: "Plan the screens" })); }
+      try { plan = parseJSONLoose(await ai.ask(planPrompt(brief, ctxText, draftId, notes, nImgs.length), { title: "Plan the screens", images: nImgs })); }
       catch (e) { throw { step: 0, msg: `Couldn't plan the screens (${e?.message || e?.code}).` }; }
       plan = (Array.isArray(plan) ? plan : plan?.screens || []).filter((s) => s && s.name).map((s, k) => ({ ...s, id: `${draftId}.${k + 1}`, index: k, crumbs: Array.isArray(s.crumbs) ? s.crumbs : [] }));
       if (!plan.length) throw { step: 0, msg: "The AI returned no screens. Try again." };
@@ -97,7 +102,7 @@ export async function runFigmaBuild({ pipelineId, getPipe, updatePipe, cfg, ai, 
         set(i, { status: "run", note: attempt ? "Fixing and retrying…" : "Writing…" });
         let body;
         const maxChars = Math.max(6000, Math.min(16000, CODE_LIMIT - screensCode(ctx, state.pageId, state.mainId, "").length - 2500));
-        try { body = stripFences(await ai.ask(batchPrompt(brief, ctxText, part, draftId, lastError, maxChars), { title: `Screens ${part[0].id}–${part[part.length - 1].id}`, onText: (t) => set(i, { note: t.length > 60 ? `${t.split("\n").length} lines written` : t }) })); jobStore.update(job.id, { lastCode: body }); }
+        try { body = stripFences(await ai.ask(batchPrompt(brief, ctxText, part, draftId, lastError, maxChars, notes, nImgs.length), { images: nImgs, title: `Screens ${part[0].id}–${part[part.length - 1].id}`, onText: (t) => set(i, { note: t.length > 60 ? `${t.split("\n").length} lines written` : t }) })); jobStore.update(job.id, { lastCode: body }); }
         catch (e) { throw { step: i, msg: `Couldn't write these screens (${e?.message || e?.code}).` }; }
         const bctx = { ...ctx, iconMap: resolveIcons(body, ctx) };
         if (screensCode(bctx, state.pageId, state.mainId, body).length > CODE_LIMIT) {

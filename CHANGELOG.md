@@ -1,5 +1,11 @@
 # Changelog
 
+## 1.3.1 · 2026-11-17
+
+### Fixed
+- Designer comments now lead every step: the matrices also receive their images, the Figma screen plan and each batch of screens get them as top-priority decisions (with images), and the prototype's navigation follows them.
+
+
 ## 1.3.0 · 2026-11-10
 
 ### Added

@@ -198,15 +198,20 @@ export async function renderScreens({ build, theme, productName }) {
 }
 
 /* Short AI call: where each hotspot goes. */
-export function wirePrompt(screens, plan) {
+export function wirePrompt(screens, plan, notes = "") {
   const desc = Object.fromEntries((plan || []).map((p) => [p.id, p]));
-  const lines = screens.map((s) => `- ${s.id} · ${s.name}${desc[s.id]?.desc ? `\n  What it shows: ${desc[s.id].desc}` : ""}\n  Hotspots:\n${s.hotspots.map((h, i) => `    ${i}: ${h.kind}${h.primary ? " (primary)" : ""} "${h.label}"`).join("\n") || "    (none)"}`).join("\n");
+  const lines = screens.map((s) => `- ${s.id} · ${s.name}${desc[s.id]?.state ? ` (${desc[s.id].state})` : ""}${desc[s.id]?.desc ? `\n  What it shows: ${desc[s.id].desc}` : ""}${desc[s.id]?.notes ? `\n  Designer: ${desc[s.id].notes}` : ""}\n  Hotspots:\n${s.hotspots.map((h, i) => `    ${i}: ${h.kind}${h.primary ? " (primary)" : ""} "${h.label}"`).join("\n") || "    (none)"}`).join("\n");
   return `Wire a clickable prototype for a usability test. For each meaningful hotspot say which screen it opens, or a short feedback message when it stays on the screen.
 
 SCREENS (journey order) AND HOTSPOTS:
 ${lines}
 
-Rules: primary actions move forward; Cancel / Close / Back go back; confirm buttons in dialogs lead to the success or result state; tabs and links open the screen that shows that content; Retry leads to the recovered state. Only use screen ids from the list. Skip hotspots with no sensible target. Toasts under 60 characters.
+${String(notes || "").trim() ? `DESIGNER COMMENTS (follow every flow, navigation and feedback decision in them; they win over the rules below):
+"""
+${String(notes).trim()}
+"""
+
+` : ""}Rules: primary actions move forward; Cancel / Close / Back go back; confirm buttons in dialogs lead to the success or result state; tabs and links open the screen that shows that content; Retry leads to the recovered state. Only use screen ids from the list. Skip hotspots with no sensible target. Toasts under 60 characters.
 
 Return exactly ONE JSON object, nothing else:
 {"start":"<screen id>","links":[{"s":"<id>","h":<index>,"to":"<id>"},{"s":"<id>","h":<index>,"back":true},{"s":"<id>","h":<index>,"toast":"Saved"}]}`;

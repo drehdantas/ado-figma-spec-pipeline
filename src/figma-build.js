@@ -850,7 +850,19 @@ function docsDataBase(pageName, ado, res, ctx, plan, cfg) {
 }
 
 /* ---------- Prompts ---------- */
-export function planPrompt(brief, contextText, draftId) {
+/* Designer comments lead the Figma prompts: they are the designer's decisions for this feature. */
+export function notesBlock(notes, images = 0) {
+  const t = String(notes || "").trim();
+  if (!t) return "";
+  return `DESIGNER COMMENTS · the product designer's decisions for this feature. Apply every comment that concerns the screens (which screens and states exist, layout, components, copy, flows, what to avoid). They win over the reference page and the SOT when the two disagree; where a comment conflicts with the acceptance criteria, follow the comment and keep the AC visible in the screen's description.${images ? ` ${images} image(s) from the comments are attached, in the order of the [Image n] markers.` : ""}
+"""
+${t}
+"""
+
+`;
+}
+
+export function planPrompt(brief, contextText, draftId, notes = "", images = 0) {
   return `You plan the screens for a Figma [Draft] page, following the reference page in the file.
 Return ONLY JSON: {"screens":[ ... ]}. Each screen: {"id":"${draftId}.N","name":"Screen name","state":"state or variant, short","acs":"AC ids this screen covers, e.g. AC-01 · AC-07","desc":"one sentence: what this screen shows and why","crumbs":["Breadcrumb","Items"]}
 Rules:
@@ -858,14 +870,15 @@ Rules:
 - Like the reference, include the states the brief implies: empty / no results, error with recovery, loading, no permission, confirmation dialogs, warnings, success.
 - Names follow the reference style, e.g. "Store list · synced market", "Failed sync · actionable error".
 - When the context has a SOURCE OF TRUTH section, follow how its real screens are named, split and ordered (which states get their own screen, how modals and confirmations are shown).
+- When there are DESIGNER COMMENTS, the plan must apply them: add, drop, split or order screens as they say, and say in "desc" which comment a screen applies. Add "notes": "what the designer asked for this screen" to each screen a comment affects.
 
-${contextText}
+${notesBlock(notes, images)}${contextText}
 
 BRIEF:
 ${brief}`;
 }
 
-export function batchPrompt(brief, contextText, screens, draftId, prevError, maxChars = 12000) {
+export function batchPrompt(brief, contextText, screens, draftId, prevError, maxChars = 12000, notes = "", images = 0) {
   return `You write Figma Plugin API JavaScript that builds product screens inside an existing design file, reusing its library components exactly the way the reference page does.
 
 Your code runs after a prelude that switched to the right page and defines these async helpers. Use ONLY them (no figma.create*, no setCurrentPageAsync, no return, no IIFE). Top-level await is allowed; await every helper.
@@ -883,7 +896,8 @@ Your code runs after a prelude that switched to the right page and defines these
 
 Rules:
 - Build exactly these screens, in order:
-${screens.map((s) => `  index ${s.index}: ${JSON.stringify({ id: s.id, name: s.name, state: s.state, acs: s.acs, desc: s.desc, crumbs: s.crumbs })}`).join("\n")}
+${screens.map((s) => `  index ${s.index}: ${JSON.stringify({ id: s.id, name: s.name, state: s.state, acs: s.acs, desc: s.desc, crumbs: s.crumbs, ...(s.notes ? { notes: s.notes } : {}) })}`).join("\n")}
+- Apply the DESIGNER COMMENTS (and each screen's "notes") in the layout, components, labels and states you build; they win over the reference and the SOT.
 - Follow the reference anatomy order inside Content: Breadcrumb (from shell) → Page header → context line (Paragraph/Small/Regular, textSecondary) → Tabs / filters → dataset title + actions → summary line → Data Table / form / message → secondary actions.
 - Every screen keeps the app chrome of the shell (top header, side navigation): never remove or rebuild it.
 - Desktop screens are 1080 px tall by default; the app makes a screen taller only when its content needs it. Don't add filler to reach the height, don't stretch content to fill it, and don't resize the screen yourself.
@@ -897,7 +911,7 @@ ${screens.map((s) => `  index ${s.index}: ${JSON.stringify({ id: s.id, name: s.n
 - HARD LIMIT: under ${Math.min(maxChars, 4500 * screens.length).toLocaleString()} characters in total (Figma rejects longer code). Define small local helper functions and loops to avoid repetition; keep sample data short.
 - Answer with JavaScript only. No Markdown fences, no prose.${prevError ? `\n- The previous attempt failed with: ${prevError}. Avoid it.` : ""}
 
-${contextText}
+${notesBlock(notes, images)}${contextText}
 
 BRIEF:
 ${brief}`;

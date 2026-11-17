@@ -140,7 +140,9 @@ function PipelineView({ cfg: wcfg, setCfg, setAi, pipe, setPipe, all, caps, ai, 
      Falls back to the local rules engine so step 3 is never empty. */
   const buildMatrices = async (base, adoText, signal, onProgress) => {
     try {
-      const data = await askJSON(buildAnalysisPrompt(adoText, { ...ctx(), prior: priorSummary(base) }, "matrices"), { signal, title: "Build the validation & drift matrices", onText: (t) => onProgress(`Writing the matrices… ${t.length.toLocaleString()} characters`) });
+      const max = await ai.imageLimit().catch(() => 0);
+      const imgs = max ? await imageBlobs(`${ado.raw}\n\n${ado.designerNotes || ""}`, ado.images, max) : [];
+      const data = await askJSON(buildAnalysisPrompt(adoText, { ...ctx(), prior: priorSummary(base) }, "matrices") + (imgs.length ? `\n\nATTACHED IMAGES: ${imgs.length} image(s) from the ADO and the designer comments, in the order of the [Image n] markers above.` : ""), { images: imgs, signal, title: "Build the validation & drift matrices", onText: (t) => onProgress(`Writing the matrices… ${t.length.toLocaleString()} characters`) });
       const n = normalize({ ...base, ...data }, ctx());
       if (!n.validation.length) throw new Error("the answer had no matrix rows");
       return { validation: n.validation, drift: n.drift, driftColumns: n.driftColumns, reviewNotes: n.reviewNotes, matricesBy: ai.label };
@@ -442,6 +444,7 @@ function App() {
     runFigmaBuild({
       pipelineId: pid, resume, cfg: cfgNow, ai, mcp: caps.mcp, notify,
       getPipe: (id) => latest.current[id], updatePipe, saveSnap: saveSnapFor(pid),
+      notesImages: async () => { const a = latest.current[pid]?.ado || {}; const max = await ai.imageLimit().catch(() => 0); return max ? imageBlobs(a.designerNotes || "", a.images, Math.min(max, 4)) : []; },
       compileBrief: () => compile(cfgNow, latest.current[pid], latest.current[pid].res, { figma: true, ds: false, dsDigest: true, prd: true, stories: true, validation: true, drift: true, board: false }, "Figma agent"),
     });
   };
@@ -493,7 +496,7 @@ function App() {
         jobStore.step(job.id, o, { status: "ok", note: `${screens.length} screens · ${screens.reduce((a, x) => a + x.hotspots.length, 0)} clickable elements · ${source}` });
         jobStore.step(job.id, o + 1, { status: "run", note: `Asking ${ai.label}…` });
         let wiring = null, by = ai.label;
-        try { const j = parseJSONLoose(await ai.ask(wirePrompt(screens, build.plan), { title: "Wire the prototype's navigation", tier: "default" })); if (Array.isArray(j?.links)) wiring = j; } catch (e) { if (e?.code === "cancelled") throw e; }
+        try { const j = parseJSONLoose(await ai.ask(wirePrompt(screens, build.plan, mdForPrompt(pipe.ado?.designerNotes || "")), { title: "Wire the prototype's navigation", tier: "default" })); if (Array.isArray(j?.links)) wiring = j; } catch (e) { if (e?.code === "cancelled") throw e; }
         if (!wiring) { wiring = { start: screens[0]?.id, links: heuristicLinks(screens) }; by = "rules"; }
         const ids = new Set(screens.map((x) => x.id));
         const links = wiring.links.filter((l) => ids.has(l.s) && Number.isInteger(l.h) && (l.back || l.toast || ids.has(l.to)));
