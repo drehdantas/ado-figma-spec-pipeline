@@ -4,7 +4,7 @@ import { checkCode } from "./proto-render.js";
 import { Btn, Modal, Field, inputCls, copyText, fmtDate } from "./ui.jsx";
 import { validationMD, driftMD, validationCSV, driftCSV, prdMD, reviewNotesMD } from "./engine.js";
 import { parseFigmaUrl, runInFigma, figmaErrorText, pagesToGroups, extractPages, screenList } from "./figma.js";
-import { SITEMAP_CODE, refPageCode, mergeContext, contextSummary, nodePageCode, pickSotPages, mergeSot, layoutSummary, PAGE_SCAN_CODE, iconName } from "./figma-context.js";
+import { SITEMAP_CODE, refPageCode, mergeContext, contextSummary, nodePageCode, pickSotPages, mergeSot, layoutSummary, PAGE_SCAN_CODE, iconName, notesRefs, designerPageCode } from "./figma-context.js";
 import { metaPages, readViewOnly, isAccessError } from "./sot-reader.js";
 import { draftPageName, draftIdOf, childPages } from "./figma-build.js";
 import { activeDS, RULES, allNodes } from "./config.js";
@@ -98,12 +98,50 @@ function FigmaBuild({ cfg, pipe, setPipe, res, mcp, ai, notify, onSitemap, start
       /* Candidate pages ranked by how many real screens they hold (any naming), same journey first.
          The best screen shell (app chrome, no overlay open) among them wins. */
       const scanT = await runInFigma(mcp, target.fileKey, PAGE_SCAN_CODE, "Read-only: count the screens on each page to pick reference pages.").catch(() => null);
-      const shellIds = [...new Set([...(node ? [node.id] : []), ...pickSotPages(sitemap.filter((p) => p.name !== pageName), null, pipe.journeyNode, Array.isArray(scanT) ? scanT : null, 5)])].slice(0, 6);
       const refErrs = [];
+      /* 1 · Designer reference: pages and links named in the designer comments are read first and lead. */
+      const dn = notesRefs(pipe.ado?.designerNotes, sitemap, pipe.figmaBuild?.pageId ? [pipe.figmaBuild.pageId] : []);
+      const dPages = [...dn.pages.map((p) => ({ pageId: p.pageId, nodeId: null, name: p.name }))];
+      const dRefs = [], designer = [];
+      for (const u of dn.urls) {
+        if (u.fileKey === target.fileKey) {
+          let pg = null;
+          if (u.nodeId) pg = await runInFigma(mcp, target.fileKey, nodePageCode(u.nodeId), "Read-only: find the page of the designer's reference link.").catch((e) => { refErrs.push(`Designer link ${u.nodeId}: ${say(e)}`); return null; });
+          if (pg?.id) { const i = dPages.findIndex((x) => x.pageId === pg.id); if (i >= 0) dPages.splice(i, 1); dPages.unshift({ pageId: pg.id, nodeId: u.nodeId, name: pg.name }); }
+          else if (!u.nodeId) refErrs.push("Designer link to this file has no node-id: link a page, section or frame.");
+          continue;
+        }
+        /* Another file: learn its structure (components can't be cloned from there). */
+        try {
+          const pg = u.nodeId ? await runInFigma(mcp, u.fileKey, nodePageCode(u.nodeId), "Read-only: find the page of the designer's reference link.") : null;
+          const d = await runInFigma(mcp, u.fileKey, designerPageCode(pg?.id || null, u.nodeId), "Read-only: read the screens the designer pointed to.");
+          if (d?.error) throw new Error(d.error);
+          designer.push({ ...d, otherFile: true, url: u.url });
+        } catch (e) {
+          if (!isAccessError(say(e))) { refErrs.push(`Designer link (other file): ${say(e)}`); continue; }
+          try {
+            const pages = await metaPages(mcp, u.fileKey);
+            const id = u.nodeId || pages[0]?.id;
+            const [r] = await readViewOnly(mcp, u.fileKey, [id], pages, refErrs);
+            if (r) designer.push({ page: r.page, focus: null, screens: r.screenNames, anatomies: r.screenAnatomy ? [{ name: r.screenNames?.[0] || "Screen", w: 0, h: 0, tree: r.screenAnatomy }] : [], otherFile: true, viewOnly: true, url: u.url });
+          } catch (e2) { refErrs.push(`Designer link (view access): ${say(e2)}`); }
+        }
+      }
+      for (const dp of dPages.slice(0, 3)) {
+        const r = await runInFigma(mcp, target.fileKey, refPageCode(dp.pageId), "Read-only: inspect the page the designer asked to follow.").catch((e) => { refErrs.push(`Designer page ${dp.name || dp.pageId}: ${say(e)}`); return null; });
+        if (r) dRefs.push({ ...r, designer: true });
+        const d = await runInFigma(mcp, target.fileKey, designerPageCode(dp.pageId, dp.nodeId), "Read-only: read the screens the designer already started.").catch((e) => { refErrs.push(`Designer page ${dp.name || dp.pageId} (screens): ${say(e)}`); return null; });
+        if (d && !d.error) designer.unshift(d);
+      }
+      /* 2 · The journey node page and the pages with the most real screens, same journey first. */
+      const skip = new Set(dPages.map((x) => x.pageId));
+      const shellIds = [...new Set([...(node && !skip.has(node.id) ? [node.id] : []), ...pickSotPages(sitemap.filter((p) => p.name !== pageName && !skip.has(p.id)), null, pipe.journeyNode, Array.isArray(scanT) ? scanT : null, 5)])].slice(0, dRefs.length ? 4 : 6);
       /* One page at a time: parallel reads of the same file hit Figma's rate limits. */
-      const refs = [];
+      const refs = [...dRefs];
       for (const id of shellIds) refs.push(await runInFigma(mcp, target.fileKey, refPageCode(id), "Read-only: inspect how screens, components, styles and handoff are built on this page.").catch((e) => { refErrs.push(`${sitemap.find((p) => p.id === id)?.name || id}: ${say(e)}`); return null; }));
       let merged = mergeContext(sitemap, refs, target.fileKey);
+      merged.designer = { sig: dn.sig, refs: designer, asked: dn.urls.length + dn.pages.length };
+      if (dn.any && !designer.length) refErrs.unshift("The designer comments point to a Figma page, but it couldn't be read.");
       const sot = parseFigmaUrl(cfg.sotUrl);
       let sotNote = "";
       if (sot) {
@@ -135,7 +173,7 @@ function FigmaBuild({ cfg, pipe, setPipe, res, mcp, ai, notify, onSitemap, start
         if (!sotNote) sotNote = n ? ` · SSOT: ${n} page${n === 1 ? "" : "s"}${viewOnly ? " (view access)" : ""}` : " · SSOT: nothing could be read";
       }
       merged.readErrors = refErrs.slice(0, 8);
-      setPipe({ figmaContext: merged, figmaRefs: shellIds, journeyNodeMissing: !node });
+      setPipe({ figmaContext: merged, figmaRefs: [...dPages.map((x) => x.pageId), ...shellIds], journeyNodeMissing: !node });
       const groups = pagesToGroups(sitemap.filter((p) => /^(↳\s*)?[A-Z]\d|^-{2,}/.test(p.name)).map((p) => p.name));
       if (groups.length) onSitemap?.(groups, sitemap.length);
       notify(`References synced · ${sitemap.length} pages, ${Object.keys(merged.exemplars).length} components${sotNote}${refErrs.length ? ` · ${refErrs.length} page${refErrs.length > 1 ? "s" : ""} couldn't be read` : ""}`);
@@ -144,7 +182,10 @@ function FigmaBuild({ cfg, pipe, setPipe, res, mcp, ai, notify, onSitemap, start
     finally { setAnalyzing(false); }
   };
 
-  const blockers = [!target && "Add the target Figma file / branch URL in Configuration.", !mcp && "Figma building needs the Figma connector, available when the app runs as a Claude artifact. Elsewhere, copy the master prompt below into an agent that has Figma access.", target && mcp && !ctx && "Sync the references first (step 1 below)."].filter(Boolean);
+  /* Designer comments that point to Figma pages: they must have been read by the last sync. */
+  const notesNow = useMemo(() => notesRefs(pipe.ado?.designerNotes, ctx?.sitemap || [], pipe.figmaBuild?.pageId ? [pipe.figmaBuild.pageId] : []), [pipe.ado?.designerNotes, ctx?.sitemap, pipe.figmaBuild?.pageId]);
+  const designerStale = !!ctx && notesNow.any && notesNow.sig !== ctx.designer?.sig;
+  const blockers = [designerStale && "The designer comments point to a Figma page that hasn't been read yet: Sync the references so the design follows it.", !target && "Add the target Figma file / branch URL in Configuration.", !mcp && "Figma building needs the Figma connector, available when the app runs as a Claude artifact. Elsewhere, copy the master prompt below into an agent that has Figma access.", target && mcp && !ctx && "Sync the references first (step 1 below)."].filter(Boolean);
   const steps = job?.steps;
   const lastCode = job?.lastCode;
   return (
@@ -169,6 +210,16 @@ function FigmaBuild({ cfg, pipe, setPipe, res, mcp, ai, notify, onSitemap, start
             <Btn size="sm" icon={analyzing ? Loader2 : RefreshCw} disabled={analyzing || !target || !mcp} onClick={() => guard("Syncing the references", analyze)}>{analyzing ? "Syncing…" : ctx ? "Sync" : "Sync references"}</Btn>
           </div>
           <p className="text-xs text-muted-strong">The design is a mix: the <span className="font-semibold">design system</span> gives the base rules and tokens, the <span className="font-semibold">source of truth</span> shows how the product really applies them (screens, components, modals, handoff).</p>
+          {(notesNow.any || ctx?.designer?.refs?.length > 0) && (
+            <div className={`rounded-md p-2.5 text-xs ${designerStale ? "bg-warn-bg text-warn-fg" : "bg-accent-soft"}`}>
+              <p className="font-semibold">Designer reference · leads the design</p>
+              {designerStale
+                ? <p className="mt-0.5">Your designer comments point to {[...notesNow.pages.map((p) => p.name), ...notesNow.urls.map((u) => (u.fileKey === target?.fileKey ? `a link in this file (${u.nodeId || "no node"})` : "a link to another file"))].join(" · ")}. Sync to read it before generating.</p>
+                : <ul className="mt-0.5 flex flex-col gap-0.5 text-muted-strong">
+                    {(ctx?.designer?.refs || []).map((r, i) => <li key={i}><span className="font-semibold text-fg">{r.page}</span>{r.focus ? ` · ${r.focus}` : ""} · {(r.screens || []).length} screens, {(r.anatomies || []).length} read in detail{r.otherFile ? ` · other file${r.viewOnly ? " (view access)" : ""}: structure only` : ctx?.refPage === r.page ? " · screen shell cloned from it" : ""}</li>)}
+                  </ul>}
+              <p className="mt-1 text-muted-strong">Pages or Figma links named in the designer comments come first: their screen shell, components, variants and screen structure are followed before the SSOT and the other pages.</p>
+            </div>)}
           <div className="rounded-md bg-surface-2 p-2.5 text-xs">
             <p className="font-semibold">Source of truth (SSOT)</p>
             {!sotT ? <p className="mt-0.5 text-warn-fg">Not set. Add the SSOT URL in Configuration; read access is enough.</p>

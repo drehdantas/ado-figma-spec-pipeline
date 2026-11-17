@@ -1,5 +1,15 @@
 # Changelog
 
+## 1.4.0 · 2026-11-17
+
+### Added
+- Designer reference: Figma pages or links named in the designer comments (by link, journey id such as `J9.4`, or page title) are read on Sync and lead the design: their screen shell, components, variants and the full structure of up to 4 screens per page come before the SSOT and the other pages. Links to other files are read for structure (view access works).
+- Generation is blocked until a Sync has read the pages the designer comments point to.
+
+### Changed
+- The AI now sees the content structure of several reference screens, not only the shell screen.
+
+
 ## 1.3.1 · 2026-11-17
 
 ### Fixed

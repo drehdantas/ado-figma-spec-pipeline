@@ -869,7 +869,7 @@ Rules:
 - Number N from 1. 8–14 screens. Cover every AC marked Designed in the validation matrix.
 - Like the reference, include the states the brief implies: empty / no results, error with recovery, loading, no permission, confirmation dialogs, warnings, success.
 - Names follow the reference style, e.g. "Store list · synced market", "Failed sync · actionable error".
-- When the context has a SOURCE OF TRUTH section, follow how its real screens are named, split and ordered (which states get their own screen, how modals and confirmations are shown).
+- When the context has a DESIGNER REFERENCE, it leads: continue the work it started (same screen naming, split and order; reuse the screens it already has as the base for the matching ones). Otherwise, when there is a SOURCE OF TRUTH section, follow how its real screens are named, split and ordered (which states get their own screen, how modals and confirmations are shown).
 - When there are DESIGNER COMMENTS, the plan must apply them: add, drop, split or order screens as they say, and say in "desc" which comment a screen applies. Add "notes": "what the designer asked for this screen" to each screen a comment affects.
 
 ${notesBlock(notes, images)}${contextText}
@@ -902,7 +902,8 @@ ${screens.map((s) => `  index ${s.index}: ${JSON.stringify({ id: s.id, name: s.n
 - Every screen keeps the app chrome of the shell (top header, side navigation): never remove or rebuild it.
 - Desktop screens are 1080 px tall by default; the app makes a screen taller only when its content needs it. Don't add filler to reach the height, don't stretch content to fill it, and don't resize the screen yourself.
 - Confirmations, warnings, edit forms and download dialogs are overlays: build the screen underneath as usual, then call modal(screen, …). Never place a dialog inside the content flow. Use kind "sidepanel" where the SOT uses side panels for editing.
-- Mix the two references: the design system in the brief is the base (tokens, component rules); the SOURCE OF TRUTH section shows how the product applies it. Build screens, modals, empty/error states and tables the way the SOT does (structure, which component goes where, action order in dialogs); prefer components marked SOT.
+- When the context has a DESIGNER REFERENCE, build each screen like its closest screen there: same components and variants, same order inside the content, same table columns, filters, notices and modal pattern; change only what this screen's ACs and the designer comments require. The SOT and other references fill only what it doesn't show.
+- Mix the references: the design system in the brief is the base (tokens, component rules); the SOURCE OF TRUTH section shows how the product applies it. Build screens, modals, empty/error states and tables the way the SOT does (structure, which component goes where, action order in dialogs); prefer components marked SOT.
 - Component names: use the names listed under "Library components available" in the context. Role names (App Header, Sidebar Navigation, Data Table, Notification, Tabs Navigation, Tab, Modal, Breadcrumb, Button, Input, Dropdown, Tag, Toggle, Checkbox, Filter, Advanced Pagination, Card) are mapped to this file's equivalent automatically, so they are safe too. Never invent other names.
 - Build every control from a library component (buttons, inputs, dropdowns, toggles, tags, tabs, tables, messages, dialogs). Plain frames only for layout; T only for headings and body text.
 - Prefer library components over frames. Use real labels and realistic sample data from the brief. Status always as Tag with words. One primary Button per screen.

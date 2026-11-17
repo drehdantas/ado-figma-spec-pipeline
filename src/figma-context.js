@@ -185,13 +185,15 @@ export function mergeContext(sitemap, refs, fileKey) {
     if (!tableCols && r.tableCols) { tableCols = r.tableCols; tableRows = r.tableRows; }
     (r.vars || []).forEach((v) => { if (!vars[v.name]) vars[v.name] = v; });
     (r.icons || []).forEach(([n, key, id, uses]) => { if (icons[n]) icons[n][3] += uses; else icons[n] = [n, key, id, uses]; });
-    /* Best shell across pages: app chrome present, no overlay open. */
-    if (r.screenExemplar && (r.shellScore ?? 0) > shellScore) { screenExemplar = r.screenExemplar; anatomy = r.screenAnatomy; refPage = r.page; shellScore = r.shellScore ?? 0; shellName = r.shellName || null; }
-    if (r.layout) layouts.push({ page: r.page, ...r.layout });
+    /* Best shell across pages: app chrome present, no overlay open. A page the designer pointed to wins
+       whenever one of its screens has the app chrome. */
+    const bonus = r.designer && (r.shellScore ?? 0) >= 400 ? 1e6 : 0;
+    if (r.screenExemplar && (r.shellScore ?? 0) + bonus > shellScore) { screenExemplar = r.screenExemplar; anatomy = r.screenAnatomy; refPage = r.page; shellScore = (r.shellScore ?? 0) + bonus; shellName = r.shellName || null; }
+    if (r.layout) layouts.push({ page: r.page, designer: !!r.designer, ...r.layout });
     if (!featureCard && r.featureCard) featureCard = r.featureCard;
     if (!handoff && r.handoff) handoff = r.handoff;
   }
-  return { fileKey, analyzedAt: new Date().toISOString(), sitemap, refs: refs.filter(Boolean).map((r) => ({ page: r.page, pageId: r.pageId, top: r.top, screens: r.screens })), exemplars: ex, styles, vars, screenExemplar, anatomy, featureCard, handoff, refPage, tableCols, tableRows, shellScore, shellName, layouts: layouts.sort((a, b) => b.screens - a.screens).slice(0, 3), icons: Object.values(icons).sort((a, b) => b[3] - a[3]).slice(0, 200) };
+  return { fileKey, analyzedAt: new Date().toISOString(), sitemap, refs: refs.filter(Boolean).map((r) => ({ page: r.page, pageId: r.pageId, top: r.top, screens: r.screens })), exemplars: ex, styles, vars, screenExemplar, anatomy, featureCard, handoff, refPage, tableCols, tableRows, shellScore, shellName, layouts: layouts.sort((a, b) => (b.designer ? 1e6 : 0) - (a.designer ? 1e6 : 0) || b.screens - a.screens).slice(0, 3), icons: Object.values(icons).sort((a, b) => b[3] - a[3]).slice(0, 200) };
 }
 
 /* The screen structure learned from existing screens, as rules the generator must follow. */
@@ -202,7 +204,7 @@ ${ls.map((l) => `- ${l.page} (${l.screens} screens, width ${l.width || "?"}): to
 Keep the same top bars, left navigation, breadcrumb position, title size and bottom bar; show dialogs as the modals / side panels listed, on a scrim.`;
 }
 export function layoutSummary(ctx) {
-  const l = [...(ctx.layouts || []), ...(ctx.sot?.layouts || [])].sort((a, b) => b.screens - a.screens)[0];
+  const l = [...(ctx.layouts || []), ...(ctx.sot?.layouts || [])].sort((a, b) => (b.designer ? 1e6 : 0) - (a.designer ? 1e6 : 0) || b.screens - a.screens)[0];
   return l || null;
 }
 
@@ -324,7 +326,7 @@ export function contextForPrompt(ctx) {
   const ex = Object.entries(ctx.exemplars).map(([k, v]) => `- ${k}: variant {${Object.entries(v.props || {}).filter(([pk]) => !/#/.test(pk) && !/state|hover|focus|press/i.test(pk)).map(([pk, pv]) => `${pk}=${pv}`).join(", ")}}${Object.keys(v.props || {}).some((pk) => /^Text#/.test(pk)) ? " · text prop" : ""}${v.swaps?.length ? ` · icon slots: ${v.swaps.join(", ")}` : ""} · ${v.w}x${v.h}${v.uses ? ` · used ${v.uses}×` : ""}${v.sot ? " · SOT" : ""}`).join("\n");
   const sitemap = ctx.sitemap.map((p) => p.name).join("\n");
   const refScreens = ctx.refs.flatMap((r) => (r.screens || []).map((s) => `- ${s.name} (${s.w}x${s.h})`)).slice(0, 30).join("\n");
-  return `FIGMA FILE CONTEXT (read from the file before designing)
+  return `${designerText(ctx)}FIGMA FILE CONTEXT (read from the file before designing)
 Sitemap (page order):
 ${sitemap}
 
@@ -393,4 +395,80 @@ export function resolveIcons(body, ctx) {
     if (sv) out[a] = { svg: svgs[sv] };
   }
   return out;
+}
+
+/* ---------- Designer reference: pages the designer points to in the comments ---------- */
+/* Figma links (any file) and page mentions by journey id ("J9.4") or page title. */
+export function notesRefs(notes, sitemap = [], skipPageIds = []) {
+  const t = String(notes || "");
+  const urls = [];
+  for (const m of t.matchAll(/https?:\/\/(?:www\.)?figma\.com\/(?:design|file|proto)\/([A-Za-z0-9]{10,})(?:\/branch\/([A-Za-z0-9]{10,}))?[^\s)\]"'<>]*/g)) {
+    const nid = (m[0].match(/node-id=(\d+)[-:%3A]+(\d+)/i) || []);
+    const u = { fileKey: m[2] || m[1], nodeId: nid[1] ? `${nid[1]}:${nid[2]}` : null, url: m[0] };
+    if (!urls.some((x) => x.fileKey === u.fileKey && x.nodeId === u.nodeId)) urls.push(u);
+  }
+  const text = t.replace(/https?:\/\/\S+/g, " ").replace(/!\[[^\]]*\]\([^)]*\)/g, " ");
+  const low = text.toLowerCase();
+  const pages = [];
+  for (const p of sitemap) {
+    if (skipPageIds.includes(p.id)) continue;
+    const clean = p.name.replace(/^[↳\s]+/, "").replace(/\s*\[draft\]\s*$/i, "").trim();
+    const id = (clean.match(/^([A-Z]\d+(?:\.\d+)*)/) || [])[1];
+    const title = clean.replace(/^[A-Z]\d+(?:\.\d+)*\s*[-–—·:|]?\s*/, "").trim();
+    const idHit = !!id && id.includes(".") && new RegExp(`(^|[^\\w.])${id.replace(/\./g, "\\.")}(?![\\w]|\\.\\d)`, "i").test(text);
+    const titleHit = title.length >= 6 && low.includes(title.toLowerCase());
+    if (idHit || titleHit) pages.push({ pageId: p.id, name: p.name, score: (idHit ? 2 : 0) + (titleHit ? 1 : 0) + (/\[draft\]/i.test(p.name) ? 0.5 : 0) });
+  }
+  pages.sort((a, b) => b.score - a.score);
+  const top = pages.slice(0, 3);
+  const sig = JSON.stringify([...urls.map((u) => `${u.fileKey}|${u.nodeId || ""}`), ...top.map((p) => p.pageId)].sort());
+  return { urls, pages: top, sig, any: urls.length + top.length > 0 };
+}
+
+/* Several screens of a page (or of a linked frame / section) with their full content structure:
+   the work the designer already started, to be followed screen by screen. */
+export const designerPageCode = (pageId, nodeId) => `
+let page = ${pageId ? `await figma.getNodeByIdAsync(${JSON.stringify(pageId)})` : "figma.currentPage"};
+if (!page) return { error: "page not found" };
+await figma.setCurrentPageAsync(page);
+const R = (v) => Math.round(v);
+let root = ${nodeId ? `await figma.getNodeByIdAsync(${JSON.stringify(nodeId)})` : "null"};
+if (!root || root.type === "PAGE" || root.type === "DOCUMENT") root = page;
+const big = (f) => f.width >= 900 && f.height >= 500;
+const cnt = (f) => { try { return f.findAllWithCriteria({ types: ["INSTANCE"] }).length; } catch (e) { return 0; } };
+let frames;
+if ((root.type === "FRAME" || root.type === "COMPONENT") && big(root)) frames = [root];
+else frames = root.findAll((n) => (n.type === "FRAME" || n.type === "COMPONENT") && big(n) && n.parent && (n.parent.type === "SECTION" || n.parent.type === "PAGE" || n.parent === root)).slice(0, 80);
+const ranked = frames.map((f) => ({ f, n: cnt(f) })).filter((x) => x.n >= 3);
+const order = (a, b) => (a.absoluteBoundingBox.y - b.absoluteBoundingBox.y) || (a.absoluteBoundingBox.x - b.absoluteBoundingBox.x);
+const pick = ranked.slice().sort((a, b) => b.n - a.n).slice(0, 4).map((x) => x.f).sort(order);
+async function tree(n, d, lines, pad, max) {
+  if (lines.length >= max || !n.visible) return;
+  let s = pad + (n.type === "INSTANCE" ? "◆" : n.type === "TEXT" ? "T" : n.type === "FRAME" ? "▢" : n.type) + " " + n.name.slice(0, 48);
+  if (n.type === "INSTANCE") {
+    try { const mc = await n.getMainComponentAsync(); if (mc) { const set = mc.parent && mc.parent.type === "COMPONENT_SET" ? mc.parent.name : mc.name; if (set !== n.name) s += " <" + set.slice(0, 40) + ">"; const vp = mc.variantProperties; if (vp) { const v = Object.entries(vp).filter(([k]) => !/state|hover|focus|press/i.test(k)).map(([k, x]) => k + "=" + x).join(", "); if (v) s += " {" + v.slice(0, 90) + "}"; } } } catch (e) {}
+    const tx = n.findAll((t) => t.type === "TEXT" && t.visible).slice(0, 3).map((t) => t.characters.slice(0, 28).replace(/\\s+/g, " "));
+    if (tx.length) s += ' "' + tx.join(" | ") + '"';
+  }
+  if ("layoutMode" in n && n.layoutMode && n.layoutMode !== "NONE") s += " [" + n.layoutMode[0] + " gap" + n.itemSpacing + "]";
+  s += " " + R(n.width) + "x" + R(n.height);
+  if (n.type === "TEXT") s += ' "' + n.characters.slice(0, 70).replace(/\\s+/g, " ") + '"';
+  lines.push(s);
+  if ("children" in n && n.type !== "INSTANCE" && d < 7) for (const c of n.children.slice(0, 20)) await tree(c, d + 1, lines, pad + "  ", max);
+}
+const out = { page: page.name, pageId: page.id, focus: root !== page ? root.name : null, screens: ranked.map((x) => x.f).sort(order).slice(0, 30).map((f) => f.name), anatomies: [] };
+let max = 75;
+for (const f of pick) { const lines = []; await tree(f, 0, lines, "", max); out.anatomies.push({ name: f.name, w: R(f.width), h: R(f.height), tree: lines.join("\\n") }); }
+while (JSON.stringify(out).length > 42000 && max > 20) { max -= 15; out.anatomies = out.anatomies.map((a) => ({ ...a, tree: a.tree.split("\\n").slice(0, max).join("\\n") })); }
+return out;`;
+
+/* The designer reference, as the first and strongest section of the Figma context. */
+export function designerText(ctx) {
+  const d = ctx.designer;
+  if (!d?.refs?.length) return "";
+  return `DESIGNER REFERENCE · the designer already started this work and asked (in the designer comments) to follow it. It comes FIRST: copy its screen structure, component choices and variants, layout, copy style, modal pattern and naming. The other references below only fill what it doesn't show.
+${d.refs.map((r) => `Page: ${r.page}${r.focus ? ` · frame/section: ${r.focus}` : ""}${r.otherFile ? ` (another file${r.viewOnly ? ", view access" : ""}: rebuild its structure with this file's library components)` : ""}
+Screens on it: ${(r.screens || []).join(" · ") || "—"}
+${(r.anatomies || []).map((a) => `Screen "${a.name}" (${a.w}x${a.h}):\n${a.tree}`).join("\n\n")}`).join("\n\n")}
+`;
 }

@@ -76,6 +76,7 @@ A Markdown field (text and images) under the raw ADO. The notes go into the anal
 
 ### Figma references, icons and screen size
 
+- **Designer reference** – name a page (`J9.4`, its title) or paste a Figma link in the designer comments: Sync reads it first and the design continues that work (same shell, components, variants and screen structure).
 - **References** – the Figma panel syncs the target file and the source of truth (SSOT). The SSOT can be a file you only view: it is read with read-only metadata and used as a visual reference. The app learns the screen structure (top bars, side navigation, breadcrumb, title size, modals and side panels) from the existing screens, whatever their naming.
 - **Design system** – the uploaded package is written guidance for the AI (tokens, component rules); colors, text styles and components in Figma come from the file's own variables, styles and library.
 - **Icons** – each button gets an icon that matches its action: from the file's icon components first, then from SVG icons in the design-system package (`.svg` files in the `.zip`). Icons that can't be found are left out.
